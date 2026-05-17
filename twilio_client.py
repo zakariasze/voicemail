@@ -20,13 +20,14 @@ import sys
 from twilio.rest import Client
 
 import config
+import state
 
 
 def _client() -> Client:
     return Client(config.twilio_account_sid(), config.twilio_auth_token())
 
 
-def place_call(to_number: str) -> str:
+def place_call(to_number: str, *, hubspot_contact_id: str | None = None) -> str:
     """Place one outbound call to ``to_number`` with AMD enabled.
 
     Returns the Twilio ``CallSid``.
@@ -43,6 +44,11 @@ def place_call(to_number: str) -> str:
     * ``status_callback`` on the ``completed`` event captures final
       call states for calls that never reach ``/voice`` (no-answer,
       busy, failed).
+
+    If ``hubspot_contact_id`` is provided, a placement row is written
+    to SQLite immediately so the webhooks can look the contact up by
+    ``CallSid`` and push the outcome back to HubSpot once the call
+    completes.
     """
     if not to_number:
         raise ValueError("to_number is required")
@@ -61,7 +67,15 @@ def place_call(to_number: str) -> str:
         status_callback_event=["completed"],
         status_callback_method="POST",
     )
-    print(f"[twilio_client] placed call CallSid={call.sid} to={to_number}")
+    state.record_call_placed(
+        call.sid,
+        to_number=to_number,
+        hubspot_contact_id=hubspot_contact_id,
+    )
+    print(
+        f"[twilio_client] placed call CallSid={call.sid} to={to_number}"
+        + (f" hubspot_contact_id={hubspot_contact_id}" if hubspot_contact_id else "")
+    )
     return call.sid
 
 

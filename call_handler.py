@@ -138,6 +138,12 @@ def call_status() -> tuple[str, int]:
     call_sid = request.values.get("CallSid", "")
     to_number = request.values.get("To") or request.values.get("Called") or ""
     cs = request.values.get("CallStatus", "")
+    # Twilio provides CallDuration in seconds on completed calls.
+    duration_raw = request.values.get("CallDuration", "") or ""
+    try:
+        duration_seconds: float | None = float(duration_raw) if duration_raw else None
+    except ValueError:
+        duration_seconds = None
 
     outcome = _STATUS_TO_OUTCOME.get(cs)  # None for 'completed'
     print(
@@ -152,7 +158,61 @@ def call_status() -> tuple[str, int]:
         outcome=outcome,  # None won't overwrite an existing outcome
         call_status=cs or None,
     )
+
+    _maybe_log_to_hubspot(call_sid, duration_seconds=duration_seconds)
     return ("", 204)
+
+
+def _maybe_log_to_hubspot(
+    call_sid: str,
+    *,
+    duration_seconds: float | None = None,
+) -> None:
+    """Push the finalized outcome to HubSpot, exactly once per call.
+
+    Called from ``/status``. No-ops unless:
+    * the SQLite row has both an ``outcome`` and a ``hubspot_contact_id``;
+    * ``hubspot_logged_at`` is still ``NULL``.
+
+    Failures are logged and swallowed — we return 204 to Twilio either
+    way. A later reconcile job can replay un-logged rows.
+    """
+    row = state.get(call_sid)
+    if not row:
+        return
+    if not row.get("hubspot_contact_id"):
+        return
+    if not row.get("outcome"):
+        # /voice hasn't run yet (e.g. no-answer with very tight timing).
+        # We still got here via /status, so ``outcome`` is in fact set
+        # by record_outcome above for terminal statuses. This guard is
+        # purely defensive.
+        return
+    if row.get("hubspot_logged_at"):
+        return  # already logged; this is a Twilio retry
+
+    try:
+        # Local import keeps the Flask boot path free of the HubSpot
+        # client (and of `requests`) until we actually need it.
+        import hubspot_client
+
+        hubspot_client.log_call(
+            row["hubspot_contact_id"],
+            outcome=row["outcome"],
+            duration_seconds=duration_seconds,
+        )
+        state.mark_hubspot_logged(call_sid)
+        print(
+            f"[hubspot] logged call for contact "
+            f"{row['hubspot_contact_id']}: {row['outcome']}",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - we deliberately catch all
+        print(
+            f"[hubspot] ERROR logging call {call_sid} for contact "
+            f"{row['hubspot_contact_id']}: {exc}",
+            flush=True,
+        )
 
 
 @app.get("/healthz")

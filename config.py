@@ -65,3 +65,14 @@ def webhook_base_url() -> str:
 def voicemail_recording_url() -> str | None:
     """Public URL of the voicemail .mp3. Optional in Phase 1."""
     return get("VOICEMAIL_RECORDING_URL")
+
+
+def hubspot_api_key() -> str:
+    """HubSpot private-app token, sent as ``Authorization: Bearer …``."""
+    return require("HUBSPOT_API_KEY")
+
+
+def hubspot_list_id() -> str:
+    """Numeric HubSpot list ID to dial from. Returned as a string so it
+    can be substituted into the URL path verbatim."""
+    return require("HUBSPOT_LIST_ID")
