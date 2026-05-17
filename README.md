@@ -8,6 +8,15 @@ Automate cold-call outreach to dental practices. The system reads a contact list
 
 ## Agent Instructions
 
+> **Before writing a single line of code, you must search the internet.** This is not optional. Look for:
+> - Existing open-source projects that do outbound voicemail dropping (GitHub, HuggingFace, Reddit, Hacker News, ProductHunt)
+> - Twilio AMD + voicemail drop implementations (search "twilio answering machine detection voicemail drop python github")
+> - HubSpot + Twilio call logging integrations (search "hubspot twilio outbound call logging python")
+> - Any SaaS tools that already solve this (e.g. SlyDial, DropCowboy, VoiceDrop) — understand how they work even if we're not using them
+> - Blog posts, tutorials, or Stack Overflow threads about automated voicemail campaigns
+>
+> **Summarize what you found** before starting Phase 1: what exists, what you can reuse or learn from, and what gaps this project fills. If a well-maintained open-source repo already solves 80% of this, say so and propose building on top of it instead of from scratch.
+
 > **To the agent reading this:** Work in strict phases. **Do not build the next phase until explicitly told to.** Each phase must be fully working, tested, and confirmed before any new code is added. The goal is a system that is always in a runnable state — never a half-built mess.
 >
 > For each phase:
