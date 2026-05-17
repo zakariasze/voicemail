@@ -1,11 +1,14 @@
 """Place a single outbound call with Twilio Answering Machine Detection.
 
-Phase 1 only. The only public surface is :func:`place_call`. The call
-URL points at our Flask ``/voice`` endpoint (which returns a trivial
-``<Hangup/>`` TwiML for now), and Twilio is asked to POST the AMD result
-asynchronously to ``/amd`` where we simply print it.
+The only public surface is :func:`place_call`. AMD runs synchronously
+(Twilio holds the TwiML request until AMD completes), so the
+``/voice`` webhook receives ``AnsweredBy`` in its POST body and can
+branch in a single TwiML response — play the voicemail on a machine,
+hang up silently on a human. A ``statusCallback`` is also registered
+so terminal call states (no-answer, busy, failed, completed) reach
+``/status`` for calls that never connect.
 
-Run directly as a script for the manual Phase 1 verification:
+Run directly as a script for the manual verification step:
 
     python twilio_client.py +15551234567
 """
@@ -31,18 +34,22 @@ def place_call(to_number: str) -> str:
     AMD configuration:
 
     * ``machine_detection='DetectMessageEnd'`` — wait until the
-      voicemail greeting finishes before reporting the result, so a
-      future Phase 2 playback starts after the beep instead of over the
-      prompt.
-    * ``async_amd_status_callback`` — Twilio POSTs ``AnsweredBy`` to our
-      ``/amd`` endpoint when AMD completes, without blocking call setup.
+      voicemail greeting finishes before reporting the result, so the
+      recording starts after the beep instead of over the prompt.
+    * Synchronous AMD (no ``async_amd``): Twilio holds the TwiML
+      request until AMD completes, then includes ``AnsweredBy`` in the
+      POST to ``/voice``. This lets a single TwiML response branch
+      between play-recording and silent-hangup.
+    * ``status_callback`` on the ``completed`` event captures final
+      call states for calls that never reach ``/voice`` (no-answer,
+      busy, failed).
     """
     if not to_number:
         raise ValueError("to_number is required")
 
     base = config.webhook_base_url()
     twiml_url = f"{base}/voice"
-    amd_callback_url = f"{base}/amd"
+    status_callback_url = f"{base}/status"
 
     call = _client().calls.create(
         to=to_number,
@@ -50,9 +57,9 @@ def place_call(to_number: str) -> str:
         url=twiml_url,
         method="POST",
         machine_detection="DetectMessageEnd",
-        async_amd=True,
-        async_amd_status_callback=amd_callback_url,
-        async_amd_status_callback_method="POST",
+        status_callback=status_callback_url,
+        status_callback_event=["completed"],
+        status_callback_method="POST",
     )
     print(f"[twilio_client] placed call CallSid={call.sid} to={to_number}")
     return call.sid
@@ -64,8 +71,9 @@ def _main(argv: list[str]) -> int:
         return 2
     place_call(argv[1])
     print(
-        "[twilio_client] call placed. Watch the Flask terminal for an\n"
-        "                [AMD] line showing AnsweredBy=..."
+        "[twilio_client] call placed. Watch the Flask terminal for\n"
+        "                [voice] (AMD outcome) and [status] (final\n"
+        "                call state) lines, and check voicemail.db."
     )
     return 0
 
