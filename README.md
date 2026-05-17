@@ -4,6 +4,8 @@
 
 Automate cold-call outreach to dental practices. The system reads a contact list from HubSpot each morning, calls each practice during their local business hours, drops a pre-recorded voicemail when the machine picks up, hangs up silently if a human answers, and writes every outcome back to HubSpot — no human dialing required.
 
+> **See `process overview.pdf`** in this repo for a visual flowchart of the full system, outcome decision tree, and dashboard mockup. Refer to it whenever the written description is ambiguous.
+
 ---
 
 ## Agent Instructions
