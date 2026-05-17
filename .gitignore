@@ -1,0 +1,16 @@
+# Secrets and local state
+.env
+*.db
+*.sqlite
+*.sqlite3
+
+# Recordings (per README — not committed)
+recordings/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
