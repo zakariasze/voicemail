@@ -66,7 +66,33 @@ CREATE TABLE IF NOT EXISTS calls (
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'paused'
+               CHECK (status IN ('active', 'paused', 'done')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS campaign_contacts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    name        TEXT,
+    phone       TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_contacts_campaign_id
+    ON campaign_contacts(campaign_id);
 """
+
+# Campaign status constants — single source of truth.
+CAMPAIGN_ACTIVE = "active"
+CAMPAIGN_PAUSED = "paused"
+CAMPAIGN_DONE = "done"
+CAMPAIGN_STATUSES = {CAMPAIGN_ACTIVE, CAMPAIGN_PAUSED, CAMPAIGN_DONE}
 
 
 # Columns introduced after the original schema. Added at init time via
@@ -235,6 +261,160 @@ def list_recent(limit: int = 50) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5: campaigns
+# ---------------------------------------------------------------------------
+
+def create_campaign(name: str) -> int:
+    """Create a new campaign in ``paused`` state. Returns its id."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("campaign name is required")
+    now = _now()
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO campaigns (name, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (name, CAMPAIGN_PAUSED, now, now),
+        )
+        return int(cur.lastrowid)
+
+
+def list_campaigns() -> list[dict]:
+    """All campaigns, newest first, with a ``contact_count`` field."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT c.id, c.name, c.status, c.created_at, c.updated_at, "
+            "       COUNT(cc.id) AS contact_count "
+            "FROM campaigns c "
+            "LEFT JOIN campaign_contacts cc ON cc.campaign_id = c.id "
+            "GROUP BY c.id "
+            "ORDER BY c.created_at DESC",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_campaign(campaign_id: int) -> dict | None:
+    """Return one campaign by id, or ``None``."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM campaigns WHERE id = ?", (int(campaign_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_campaign_status(campaign_id: int, status: str) -> None:
+    """Manually update a campaign's status. Validates against the enum."""
+    if status not in CAMPAIGN_STATUSES:
+        raise ValueError(f"unknown campaign status: {status!r}")
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE campaigns SET status=?, updated_at=? WHERE id=?",
+            (status, now, int(campaign_id)),
+        )
+
+
+def add_campaign_contacts(
+    campaign_id: int,
+    contacts: list[dict],
+) -> int:
+    """Bulk-insert ``contacts`` (already-normalised) into a campaign.
+
+    Each row must have a non-empty ``phone``. ``name`` is optional.
+    Returns the number of rows inserted. Caller is responsible for
+    phone normalisation (use ``hubspot_client.normalize_phone``).
+    """
+    if not contacts:
+        return 0
+    now = _now()
+    rows = []
+    for c in contacts:
+        phone = (c.get("phone") or "").strip()
+        if not phone:
+            continue
+        rows.append((int(campaign_id), (c.get("name") or None), phone, now))
+    if not rows:
+        return 0
+    with _connect() as conn:
+        conn.executemany(
+            "INSERT INTO campaign_contacts "
+            "(campaign_id, name, phone, created_at) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+    return len(rows)
+
+
+def list_campaign_contacts(campaign_id: int) -> list[dict]:
+    """Contacts in a campaign with per-phone call stats joined in.
+
+    Returns rows shaped like::
+
+        {
+            "id": int, "name": str|None, "phone": str,
+            "attempt_count": int,
+            "last_outcome": str|None,
+            "last_call_at": str|None,  # ISO 8601 UTC from calls.updated_at
+        }
+
+    Stats come from a LEFT JOIN on ``calls.to_number = campaign_contacts.phone``.
+    A contact with no calls has ``attempt_count=0`` and ``None`` for the
+    other two fields.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT "
+            "  cc.id, cc.name, cc.phone, "
+            "  COUNT(c.call_sid) AS attempt_count, "
+            "  MAX(c.updated_at) AS last_call_at, "
+            "  ( "
+            "    SELECT c2.outcome FROM calls c2 "
+            "    WHERE c2.to_number = cc.phone AND c2.outcome IS NOT NULL "
+            "    ORDER BY c2.updated_at DESC LIMIT 1 "
+            "  ) AS last_outcome "
+            "FROM campaign_contacts cc "
+            "LEFT JOIN calls c ON c.to_number = cc.phone "
+            "WHERE cc.campaign_id = ? "
+            "GROUP BY cc.id "
+            "ORDER BY cc.id ASC",
+            (int(campaign_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_active_campaign_targets() -> list[dict]:
+    """Phones to dial from currently-active campaigns, in insertion order.
+
+    Used by the scheduler. Returns rows shaped like::
+
+        {"campaign_id": int, "campaign_contact_id": int,
+         "name": str|None, "phone": str}
+
+    Only rows whose campaign has ``status='active'`` are returned.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT cc.campaign_id, cc.id AS campaign_contact_id, "
+            "       cc.name, cc.phone "
+            "FROM campaign_contacts cc "
+            "JOIN campaigns c ON c.id = cc.campaign_id "
+            "WHERE c.status = ? "
+            "ORDER BY cc.campaign_id ASC, cc.id ASC",
+            (CAMPAIGN_ACTIVE,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def has_active_campaign() -> bool:
+    """``True`` iff at least one campaign has ``status='active'``."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM campaigns WHERE status = ? LIMIT 1",
+            (CAMPAIGN_ACTIVE,),
+        ).fetchone()
+        return row is not None
+
+
+# ---------------------------------------------------------------------------
 # Tiny self-test: `python state.py` round-trips the schema in a temp DB and
 # prints PASS. Not a substitute for the manual verification in
 # docs/phase2-plan.md, but a sanity check that the module imports and the
@@ -293,6 +473,74 @@ def _self_test() -> int:
             raise AssertionError("unknown outcome should have raised")
 
         assert len(list_recent()) == 2
+
+        # ------------------------------------------------------------------
+        # Phase 5: campaigns
+        # ------------------------------------------------------------------
+        cid = create_campaign("smoke")
+        assert isinstance(cid, int) and cid > 0
+
+        # Newly created campaigns are paused, not active.
+        camp = get_campaign(cid)
+        assert camp is not None
+        assert camp["status"] == CAMPAIGN_PAUSED, camp
+        assert not has_active_campaign()
+
+        # Insert two contacts; one with a phone matching an existing call.
+        inserted = add_campaign_contacts(
+            cid,
+            [
+                {"name": "Alice", "phone": "+15550000001"},  # has 1 call (CA1)
+                {"name": "Bob",   "phone": "+15559999999"},  # no calls
+                {"name": "",      "phone": ""},              # skipped
+            ],
+        )
+        assert inserted == 2, inserted
+
+        rows = list_campaign_contacts(cid)
+        assert len(rows) == 2, rows
+        by_phone = {r["phone"]: r for r in rows}
+        assert by_phone["+15550000001"]["attempt_count"] == 1
+        assert by_phone["+15550000001"]["last_outcome"] == OUTCOME_VOICEMAIL_LEFT
+        assert by_phone["+15550000001"]["last_call_at"] is not None
+        assert by_phone["+15559999999"]["attempt_count"] == 0
+        assert by_phone["+15559999999"]["last_outcome"] is None
+        assert by_phone["+15559999999"]["last_call_at"] is None
+
+        # Active targets: empty while paused, populated when active.
+        assert list_active_campaign_targets() == []
+        set_campaign_status(cid, CAMPAIGN_ACTIVE)
+        assert has_active_campaign()
+        targets = list_active_campaign_targets()
+        assert len(targets) == 2
+        assert {t["phone"] for t in targets} == {"+15550000001", "+15559999999"}
+
+        # Manual transitions.
+        set_campaign_status(cid, CAMPAIGN_PAUSED)
+        assert not has_active_campaign()
+        set_campaign_status(cid, CAMPAIGN_DONE)
+        assert get_campaign(cid)["status"] == CAMPAIGN_DONE
+
+        # Bad status must raise.
+        try:
+            set_campaign_status(cid, "bogus")
+        except ValueError:
+            pass
+        else:  # pragma: no cover - defensive
+            raise AssertionError("bad status should have raised")
+
+        # Empty-name campaign must raise.
+        try:
+            create_campaign("   ")
+        except ValueError:
+            pass
+        else:  # pragma: no cover - defensive
+            raise AssertionError("empty name should have raised")
+
+        # list_campaigns includes contact_count.
+        campaigns = list_campaigns()
+        assert len(campaigns) == 1
+        assert campaigns[0]["contact_count"] == 2
 
         # Migration round-trip: create an old-schema DB (no Phase 3
         # columns) then re-init and confirm the columns appear and the
