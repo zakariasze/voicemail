@@ -68,24 +68,14 @@ CREATE TABLE IF NOT EXISTS calls (
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'paused'
-               CHECK (status IN ('active', 'paused', 'done')),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,
+    hubspot_list_id  TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'paused'
+                     CHECK (status IN ('active', 'paused', 'done')),
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS campaign_contacts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    name        TEXT,
-    phone       TEXT NOT NULL,
-    created_at  TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_campaign_contacts_campaign_id
-    ON campaign_contacts(campaign_id);
 """
 
 # Campaign status constants — single source of truth.
@@ -101,6 +91,13 @@ CAMPAIGN_STATUSES = {CAMPAIGN_ACTIVE, CAMPAIGN_PAUSED, CAMPAIGN_DONE}
 _MIGRATIONS: list[tuple[str, str]] = [
     ("hubspot_contact_id", "ALTER TABLE calls ADD COLUMN hubspot_contact_id TEXT"),
     ("hubspot_logged_at",  "ALTER TABLE calls ADD COLUMN hubspot_logged_at TEXT"),
+]
+
+# Additive migrations for the campaigns table (added after the initial
+# Phase 5 commit). Same idea as ``_MIGRATIONS`` for ``calls`` above.
+_CAMPAIGN_MIGRATIONS: list[tuple[str, str]] = [
+    ("hubspot_list_id",
+     "ALTER TABLE campaigns ADD COLUMN hubspot_list_id TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -127,6 +124,15 @@ def init_db() -> None:
         for column, ddl in _MIGRATIONS:
             if column not in existing:
                 conn.execute(ddl)
+        existing_campaign = {
+            row["name"] for row in conn.execute("PRAGMA table_info(campaigns)")
+        }
+        for column, ddl in _CAMPAIGN_MIGRATIONS:
+            if column not in existing_campaign:
+                conn.execute(ddl)
+        # Older Phase-5 dev DBs may still have the now-unused
+        # campaign_contacts table. Drop it so the schema stays tidy.
+        conn.execute("DROP TABLE IF EXISTS campaign_contacts")
 
 
 def _now() -> str:
@@ -264,31 +270,35 @@ def list_recent(limit: int = 50) -> list[dict]:
 # Phase 5: campaigns
 # ---------------------------------------------------------------------------
 
-def create_campaign(name: str) -> int:
-    """Create a new campaign in ``paused`` state. Returns its id."""
+def create_campaign(name: str, hubspot_list_id: str) -> int:
+    """Create a new campaign in ``paused`` state. Returns its id.
+
+    A campaign is a (name, HubSpot list id) pair. Contacts are pulled
+    live from HubSpot at display / dial time — we don't snapshot them.
+    """
     name = (name or "").strip()
     if not name:
         raise ValueError("campaign name is required")
+    list_id = (hubspot_list_id or "").strip()
+    if not list_id:
+        raise ValueError("hubspot_list_id is required")
     now = _now()
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO campaigns (name, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?)",
-            (name, CAMPAIGN_PAUSED, now, now),
+            "INSERT INTO campaigns "
+            "(name, hubspot_list_id, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, list_id, CAMPAIGN_PAUSED, now, now),
         )
         return int(cur.lastrowid)
 
 
 def list_campaigns() -> list[dict]:
-    """All campaigns, newest first, with a ``contact_count`` field."""
+    """All campaigns, newest first."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT c.id, c.name, c.status, c.created_at, c.updated_at, "
-            "       COUNT(cc.id) AS contact_count "
-            "FROM campaigns c "
-            "LEFT JOIN campaign_contacts cc ON cc.campaign_id = c.id "
-            "GROUP BY c.id "
-            "ORDER BY c.created_at DESC",
+            "SELECT id, name, hubspot_list_id, status, created_at, updated_at "
+            "FROM campaigns ORDER BY created_at DESC",
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -314,104 +324,71 @@ def set_campaign_status(campaign_id: int, status: str) -> None:
         )
 
 
-def add_campaign_contacts(
-    campaign_id: int,
-    contacts: list[dict],
-) -> int:
-    """Bulk-insert ``contacts`` (already-normalised) into a campaign.
+def get_active_campaign() -> dict | None:
+    """Return the oldest currently-active campaign, or ``None``.
 
-    Each row must have a non-empty ``phone``. ``name`` is optional.
-    Returns the number of rows inserted. Caller is responsible for
-    phone normalisation (use ``hubspot_client.normalize_phone``).
-    """
-    if not contacts:
-        return 0
-    now = _now()
-    rows = []
-    for c in contacts:
-        phone = (c.get("phone") or "").strip()
-        if not phone:
-            continue
-        rows.append((int(campaign_id), (c.get("name") or None), phone, now))
-    if not rows:
-        return 0
-    with _connect() as conn:
-        conn.executemany(
-            "INSERT INTO campaign_contacts "
-            "(campaign_id, name, phone, created_at) VALUES (?, ?, ?, ?)",
-            rows,
-        )
-    return len(rows)
-
-
-def list_campaign_contacts(campaign_id: int) -> list[dict]:
-    """Contacts in a campaign with per-phone call stats joined in.
-
-    Returns rows shaped like::
-
-        {
-            "id": int, "name": str|None, "phone": str,
-            "attempt_count": int,
-            "last_outcome": str|None,
-            "last_call_at": str|None,  # ISO 8601 UTC from calls.updated_at
-        }
-
-    Stats come from a LEFT JOIN on ``calls.to_number = campaign_contacts.phone``.
-    A contact with no calls has ``attempt_count=0`` and ``None`` for the
-    other two fields.
+    "Oldest" — by ``created_at`` — gives a stable choice if the user
+    accidentally has more than one active campaign.
     """
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT "
-            "  cc.id, cc.name, cc.phone, "
-            "  COUNT(c.call_sid) AS attempt_count, "
-            "  MAX(c.updated_at) AS last_call_at, "
-            "  ( "
-            "    SELECT c2.outcome FROM calls c2 "
-            "    WHERE c2.to_number = cc.phone AND c2.outcome IS NOT NULL "
-            "    ORDER BY c2.updated_at DESC LIMIT 1 "
-            "  ) AS last_outcome "
-            "FROM campaign_contacts cc "
-            "LEFT JOIN calls c ON c.to_number = cc.phone "
-            "WHERE cc.campaign_id = ? "
-            "GROUP BY cc.id "
-            "ORDER BY cc.id ASC",
-            (int(campaign_id),),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def list_active_campaign_targets() -> list[dict]:
-    """Phones to dial from currently-active campaigns, in insertion order.
-
-    Used by the scheduler. Returns rows shaped like::
-
-        {"campaign_id": int, "campaign_contact_id": int,
-         "name": str|None, "phone": str}
-
-    Only rows whose campaign has ``status='active'`` are returned.
-    """
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT cc.campaign_id, cc.id AS campaign_contact_id, "
-            "       cc.name, cc.phone "
-            "FROM campaign_contacts cc "
-            "JOIN campaigns c ON c.id = cc.campaign_id "
-            "WHERE c.status = ? "
-            "ORDER BY cc.campaign_id ASC, cc.id ASC",
+        row = conn.execute(
+            "SELECT * FROM campaigns WHERE status = ? "
+            "ORDER BY created_at ASC LIMIT 1",
             (CAMPAIGN_ACTIVE,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def has_active_campaign() -> bool:
     """``True`` iff at least one campaign has ``status='active'``."""
+    return get_active_campaign() is not None
+
+
+def phone_call_stats(phones: list[str]) -> dict[str, dict]:
+    """Look up call stats for a batch of phone numbers.
+
+    Returns a ``{phone: {"attempt_count": int, "last_outcome": str|None,
+    "last_call_at": str|None}}`` map. Phones not present in the
+    ``calls`` table are returned with ``attempt_count=0`` and ``None``
+    for the other two fields. Used by the dashboard detail page to
+    decorate live HubSpot contacts with their local call history.
+    """
+    out: dict[str, dict] = {
+        p: {"attempt_count": 0, "last_outcome": None, "last_call_at": None}
+        for p in phones if p
+    }
+    if not out:
+        return out
+    placeholders = ",".join("?" for _ in out)
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM campaigns WHERE status = ? LIMIT 1",
-            (CAMPAIGN_ACTIVE,),
-        ).fetchone()
-        return row is not None
+        rows = conn.execute(
+            f"SELECT to_number, "
+            f"  COUNT(*) AS attempt_count, "
+            f"  MAX(updated_at) AS last_call_at "
+            f"FROM calls "
+            f"WHERE to_number IN ({placeholders}) "
+            f"GROUP BY to_number",
+            tuple(out.keys()),
+        ).fetchall()
+        for r in rows:
+            d = out[r["to_number"]]
+            d["attempt_count"] = int(r["attempt_count"] or 0)
+            d["last_call_at"] = r["last_call_at"]
+        # Last outcome: pick most-recent non-NULL outcome per phone.
+        rows = conn.execute(
+            f"SELECT to_number, outcome FROM calls "
+            f"WHERE to_number IN ({placeholders}) AND outcome IS NOT NULL "
+            f"ORDER BY updated_at DESC",
+            tuple(out.keys()),
+        ).fetchall()
+        seen: set[str] = set()
+        for r in rows:
+            phone = r["to_number"]
+            if phone in seen:
+                continue
+            seen.add(phone)
+            out[phone]["last_outcome"] = r["outcome"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -475,45 +452,33 @@ def _self_test() -> int:
         assert len(list_recent()) == 2
 
         # ------------------------------------------------------------------
-        # Phase 5: campaigns
+        # Phase 5: campaigns (HubSpot-list sourced)
         # ------------------------------------------------------------------
-        cid = create_campaign("smoke")
+        cid = create_campaign("smoke", "12345")
         assert isinstance(cid, int) and cid > 0
 
-        # Newly created campaigns are paused, not active.
         camp = get_campaign(cid)
         assert camp is not None
         assert camp["status"] == CAMPAIGN_PAUSED, camp
+        assert camp["hubspot_list_id"] == "12345", camp
         assert not has_active_campaign()
+        assert get_active_campaign() is None
 
-        # Insert two contacts; one with a phone matching an existing call.
-        inserted = add_campaign_contacts(
-            cid,
-            [
-                {"name": "Alice", "phone": "+15550000001"},  # has 1 call (CA1)
-                {"name": "Bob",   "phone": "+15559999999"},  # no calls
-                {"name": "",      "phone": ""},              # skipped
-            ],
-        )
-        assert inserted == 2, inserted
+        # phone_call_stats: phones with and without prior calls.
+        stats = phone_call_stats(["+15550000001", "+15559999999", ""])
+        assert stats["+15550000001"]["attempt_count"] == 1
+        assert stats["+15550000001"]["last_outcome"] == OUTCOME_VOICEMAIL_LEFT
+        assert stats["+15550000001"]["last_call_at"] is not None
+        assert stats["+15559999999"]["attempt_count"] == 0
+        assert stats["+15559999999"]["last_outcome"] is None
+        assert "" not in stats
 
-        rows = list_campaign_contacts(cid)
-        assert len(rows) == 2, rows
-        by_phone = {r["phone"]: r for r in rows}
-        assert by_phone["+15550000001"]["attempt_count"] == 1
-        assert by_phone["+15550000001"]["last_outcome"] == OUTCOME_VOICEMAIL_LEFT
-        assert by_phone["+15550000001"]["last_call_at"] is not None
-        assert by_phone["+15559999999"]["attempt_count"] == 0
-        assert by_phone["+15559999999"]["last_outcome"] is None
-        assert by_phone["+15559999999"]["last_call_at"] is None
-
-        # Active targets: empty while paused, populated when active.
-        assert list_active_campaign_targets() == []
+        # Active campaign lookup.
         set_campaign_status(cid, CAMPAIGN_ACTIVE)
         assert has_active_campaign()
-        targets = list_active_campaign_targets()
-        assert len(targets) == 2
-        assert {t["phone"] for t in targets} == {"+15550000001", "+15559999999"}
+        active = get_active_campaign()
+        assert active is not None and active["id"] == cid
+        assert active["hubspot_list_id"] == "12345"
 
         # Manual transitions.
         set_campaign_status(cid, CAMPAIGN_PAUSED)
@@ -529,18 +494,19 @@ def _self_test() -> int:
         else:  # pragma: no cover - defensive
             raise AssertionError("bad status should have raised")
 
-        # Empty-name campaign must raise.
-        try:
-            create_campaign("   ")
-        except ValueError:
-            pass
-        else:  # pragma: no cover - defensive
-            raise AssertionError("empty name should have raised")
+        # Empty name / list id must raise.
+        for bad in (("   ", "1"), ("name", "  ")):
+            try:
+                create_campaign(*bad)
+            except ValueError:
+                pass
+            else:  # pragma: no cover - defensive
+                raise AssertionError(f"empty arg should have raised: {bad!r}")
 
-        # list_campaigns includes contact_count.
+        # list_campaigns.
         campaigns = list_campaigns()
         assert len(campaigns) == 1
-        assert campaigns[0]["contact_count"] == 2
+        assert campaigns[0]["hubspot_list_id"] == "12345"
 
         # Migration round-trip: create an old-schema DB (no Phase 3
         # columns) then re-init and confirm the columns appear and the

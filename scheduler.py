@@ -80,8 +80,9 @@ def count_attempts(contact_id: str) -> int:
 def count_attempts_by_phone(phone: str) -> int:
     """Return how many placements have been recorded for ``phone``.
 
-    Used by the campaign path, where contacts are identified by phone
-    rather than by a HubSpot contact id.
+    Kept available for future callers; not currently used by the
+    scheduler since campaign contacts come from HubSpot and are
+    identified by contact id.
     """
     if not phone:
         return 0
@@ -133,29 +134,25 @@ def pending_contacts(
 
 # --- Source selection (Phase 5) -------------------------------------------
 
-def _campaign_targets() -> list[dict[str, Any]]:
-    """Return campaign-contact rows shaped like ``pending_contacts`` output.
+def _pick_source() -> tuple[list[dict[str, Any]], str]:
+    """Choose which HubSpot list to dial from this pass.
 
-    Each row has the same ``_phone_e164`` / ``_attempts_before`` keys
-    the run loop expects, plus a synthetic ``id`` of ``None`` so the
-    placement call passes ``hubspot_contact_id=None`` (Phase 5 §4 —
-    CSV campaigns skip HubSpot).
+    Returns ``(contacts, label)`` where ``contacts`` is the raw HubSpot
+    contact list (same shape as ``hubspot_client.list_contacts()``
+    returns) and ``label`` describes the source for logging.
+
+    If any campaign has ``status='active'``, that campaign's
+    ``hubspot_list_id`` is used. Otherwise the env-configured default
+    list (``hubspot_client.list_contacts()`` with no argument) is used
+    — the existing Phase 4 behaviour.
     """
-    out: list[dict[str, Any]] = []
-    for t in state.list_active_campaign_targets():
-        phone = t["phone"]
-        out.append(
-            {
-                "id": None,  # not a HubSpot contact
-                "firstname": t.get("name"),
-                "lastname": None,
-                "phone": phone,
-                "_phone_e164": phone,
-                "_attempts_before": count_attempts_by_phone(phone),
-                "_source": f"campaign {t['campaign_id']}",
-            }
-        )
-    return out
+    active = state.get_active_campaign()
+    if active:
+        list_id = active["hubspot_list_id"]
+        contacts = hubspot_client.list_contacts(list_id)
+        return contacts, f"campaign {active['id']} (HubSpot list {list_id})"
+    contacts = hubspot_client.list_contacts()
+    return contacts, "HubSpot list (default)"
 
 
 # --- Scheduling pass -------------------------------------------------------
@@ -180,11 +177,7 @@ def _describe(contact: dict[str, Any]) -> str:
     name = " ".join(
         part for part in (contact.get("firstname"), contact.get("lastname")) if part
     ).strip() or "(no name)"
-    cid = contact.get("id")
-    if cid is None:
-        # Phase 5 campaign contacts have no HubSpot id.
-        return f"campaign contact ({name})"
-    return f"contact {cid} ({name})"
+    return f"contact {contact.get('id')} ({name})"
 
 
 def run_once(
@@ -199,19 +192,12 @@ def run_once(
     """
     interval = _resolve_interval(interval_seconds)
 
-    # Phase 5: when any campaign is `active`, dial its contacts.
-    # Otherwise fall back to the HubSpot list source. Campaign contacts
-    # are never filtered on attempt count (no max attempts, per user
-    # spec) and dial with hubspot_contact_id=None so /status doesn't
-    # try to push to HubSpot.
-    if state.has_active_campaign():
-        to_call = _campaign_targets()
-        skipped: list[tuple[dict[str, Any], str]] = []
-        source = "active campaign(s)"
-    else:
-        contacts = hubspot_client.list_contacts()
-        to_call, skipped = pending_contacts(contacts)
-        source = "HubSpot list"
+    # Phase 5: pick the source list. Active campaign → that campaign's
+    # HubSpot list; otherwise the env-default list. Contacts in either
+    # case are real HubSpot contacts, so `pending_contacts` filtering
+    # and HubSpot logging both apply uniformly.
+    contacts, source = _pick_source()
+    to_call, skipped = pending_contacts(contacts)
 
     print(f"[scheduler] source: {source}", flush=True)
 
@@ -249,7 +235,7 @@ def run_once(
         try:
             twilio_client.place_call(
                 c["_phone_e164"],
-                hubspot_contact_id=str(c["id"]) if c.get("id") else None,
+                hubspot_contact_id=str(c["id"]),
             )
             dialed += 1
         except Exception as exc:  # noqa: BLE001 - never crash a whole pass

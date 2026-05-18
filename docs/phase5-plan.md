@@ -8,45 +8,50 @@
 ## User modification accepted
 
 The user replaced the read-only dashboard with a small **campaigns**
-feature on top of the existing call infrastructure. Direct quotes from
-the chat:
+feature. The contacts being dialed always come from a HubSpot list —
+each campaign just selects which list to use. There is no CSV paste,
+no manual entry, and no Twilio-side contact list.
 
-> 1. `/campaigns/{id}` detail page: show a table with one row per
->    contact: name, phone, attempt count, last outcome, last call time.
->    Page-level actions: Start (active), Pause (paused), Done (done).
->    No per-contact actions.
-> 2. Any routes beyond detail page: no additional routes, no JSON API,
->    no exports, no recording playback.
-> 3. Scheduler integration: modify `scheduler.py` to dial from
->    `campaign_contacts` when any campaign has status `active`. Keep
+Direct quote, after an early misread:
+
+> "I want the list of contacts being pulled from hubspot list only.
+>  Those are the numbers that are being dialed not manual entry or
+>  pulling from the twilio list of contacts"
+
+And the original 7 clarifications from the chat (still in force):
+
+> 1. `/campaigns/{id}` detail page: table with one row per contact —
+>    name, phone, attempt count, last outcome, last call time.
+>    Page-level Start / Pause / Done.
+> 2. No additional routes, no JSON API, no exports, no recording
+>    playback.
+> 3. Scheduler: dial from the active campaign's HubSpot list. Keep
 >    the existing HubSpot-list source as a **fallback** (no active
->    campaign → fall back). Track attempt count by joining the
->    existing `calls` table on `to_number`. **No max attempts limit
->    — dial every contact in the active campaign every run.**
+>    campaign → fall back to the env-default list). Track attempt
+>    count via the existing `calls` table. **No max attempts.**
 > 4. Status transitions: manual only. Scheduler never auto-transitions.
-> 5. HubSpot for CSV phones: CSV campaigns skip HubSpot entirely.
->    Outcomes recorded locally in SQLite only.
+> 5. Outcomes recorded locally in SQLite, and (because contacts are
+>    real HubSpot contacts) also pushed to HubSpot by the existing
+>    `/status` webhook — no special case needed.
 > 6. Templates: inline Jinja strings in `dashboard.py`. No `templates/`.
 > 7. Auth: none.
 
 So this phase delivers:
 
-* A `campaigns` and `campaign_contacts` table in the existing SQLite
-  file, added via additive migrations in `state.py` so existing rows
-  survive.
+* A `campaigns` table in the existing SQLite file (no
+  `campaign_contacts` — contacts live in HubSpot, not here).
 * `dashboard.py` — a small Flask app with three pages and one
-  action endpoint, all rendered from inline Jinja strings.
-* A surgical change to `scheduler.py`: if any campaign is `active`,
-  dial that campaign's `campaign_contacts`; otherwise behave exactly
-  as before (HubSpot list source).
+  action endpoint, rendered from inline Jinja strings.
+* A surgical change to `scheduler.py`: pick the source HubSpot list
+  based on whether there is an active campaign.
 
 ## Files added / modified
 
 | File | Change |
 |---|---|
 | `dashboard.py` | **NEW.** Flask app, inline Jinja, no auth. |
-| `state.py` | **Modified.** Added `campaigns` / `campaign_contacts` tables (via the same `_MIGRATIONS` pattern used in Phase 3) and helper functions. No existing function is changed. |
-| `scheduler.py` | **Modified.** Source selection: active campaigns first, HubSpot list as fallback. Existing behaviour is preserved when no campaign is active. |
+| `state.py` | **Modified.** Added `campaigns` table + helpers. No existing function is changed. |
+| `scheduler.py` | **Modified.** Source selection: active campaign's `hubspot_list_id` first, env-default list as fallback. Existing behaviour is preserved when no campaign is active. |
 | `docs/phase5-plan.md` | This file. |
 
 `requirements.txt`, `main.py`, `call_handler.py`, `twilio_client.py`,
@@ -54,81 +59,73 @@ So this phase delivers:
 
 ## Decisions
 
-### 1. Why store campaigns in the existing SQLite, not a new file
-One file means a single backup, one migration story, and trivial joins
-between `calls` and `campaign_contacts` for the "attempt count / last
-outcome" columns on the detail page. `state.py` already follows an
-additive-migration pattern (`_MIGRATIONS`); we extend it with two new
-tables.
+### 1. Campaign = (name, hubspot_list_id)
+A campaign is just two pieces of metadata: a human-readable name and
+the HubSpot list it sources contacts from. Contacts are not snapshotted
+into SQLite — the detail page and scheduler both pull live from
+HubSpot every request / every pass. This keeps "what's in the list"
+authoritative in HubSpot and avoids stale-snapshot bugs.
 
 ### 2. Campaign status values
 Exactly the three values the user named: `active`, `paused`, `done`.
 A `CHECK` constraint enforces this so a typo in a future caller fails
-loudly. New campaigns start `paused` so that creating a campaign does
+loudly. New campaigns start `paused` so creating a campaign does
 not immediately start dialling.
 
-### 3. Attempts via JOIN on `to_number`
-Existing `calls` rows already have `to_number` in E.164. Campaign
-contacts also store `phone` in E.164 (normalised on insert via
-`hubspot_client.normalize_phone`). A `LEFT JOIN calls ON
-calls.to_number = campaign_contacts.phone` gives attempt count and the
-most-recent outcome / `updated_at`. Caveat: if the same phone appears
-in two campaigns the counts include calls placed by either; that's
-acceptable for a single-user tool and avoids a more invasive
-`calls.campaign_contact_id` column.
+### 3. Attempts and last outcome — JOIN on `to_number`
+The detail page calls `hubspot_client.list_contacts(list_id)` to get
+the contacts, normalises each phone, then calls
+`state.phone_call_stats(phones)` which does a single `SELECT … FROM
+calls WHERE to_number IN (…)` to get attempt count and most-recent
+outcome / call time per phone. A phone with no rows gets
+`attempt_count=0` and `None` for the other two fields.
 
-### 4. CSV campaigns skip HubSpot
-`twilio_client.place_call` is called with `hubspot_contact_id=None`
-for campaign contacts. The existing `/status` HubSpot push is already
-gated on `hubspot_contact_id` being non-NULL (see
-`call_handler._maybe_log_to_hubspot`), so this path naturally
-short-circuits — no change needed there.
+### 4. No max attempts on campaigns
+The user said "dial every contact in the active campaign every run".
+The Phase 4 `MAX_ATTEMPTS` filter was already removed in commit
+`70e9e0d`; both the campaign path and the fallback path now dial every
+contact every pass.
 
-### 5. No max attempts on campaigns
-The user explicitly said "dial every contact in the active campaign
-every run". The Phase 4 `MAX_ATTEMPTS` filter only applied to the
-HubSpot-list path and was already removed in commit `70e9e0d` ("remove
-max attempts cap"). The campaign path never applies that filter to
-begin with.
+### 5. Source selection in `scheduler.run_once`
+At the top of `run_once`, `_pick_source()` returns either the active
+campaign's HubSpot list contacts or the env-default list contacts,
+plus a label for logging. The rest of `run_once` is unchanged —
+`pending_contacts(…)` filtering, dialing with `hubspot_contact_id`
+set, and the existing HubSpot logging in `/status` all work exactly
+as before because campaign contacts are real HubSpot contacts.
 
-### 6. Source selection: active campaigns vs HubSpot list
-At the top of `run_once`, query `campaigns` for any row with
-`status='active'`. If found, dial those campaigns' contacts (in
-`created_at` order across campaigns). If not, behave exactly as
-before — `hubspot_client.list_contacts()` plus `pending_contacts(...)`.
-This keeps the existing Phase 1–4 verification path intact.
+### 6. Picking among multiple active campaigns
+If more than one campaign is `active`, `state.get_active_campaign()`
+returns the oldest by `created_at`. The dashboard never *requires*
+exactly one active campaign — that's a soft single-user convention —
+but the scheduler always has a deterministic choice. The user is
+expected to manage status manually.
 
-### 7. CSV parsing
-Accept pasted text in two shapes, one per line:
-
-* `name,phone`
-* `phone` alone
-
-Lines are split with the stdlib `csv` module. Empty / whitespace-only
-lines are skipped. Phones are run through `hubspot_client.normalize_phone`
-on insert; rows whose phone fails to normalise are reported back to
-the user on the create page (count of skipped lines) and **not**
-inserted.
-
-### 8. Inline Jinja, no `templates/`
+### 7. Inline Jinja, no `templates/`
 The user asked for inline strings. They are kept short and use
-Jinja's auto-escape (`Environment(autoescape=True)`) so CSV-pasted
-names cannot inject HTML.
+Jinja's auto-escape (the default for `render_template_string` in
+Flask) so HubSpot names and campaign names cannot inject HTML.
 
-### 9. Actions are HTML form POSTs
-`POST /campaigns/<id>/status` with form field `status=active|paused|done`,
-plus a CSRF-free design (no auth, single-user tool, same posture as
-`call_handler.py`). After a successful POST, redirect (303) to the
-detail page so a refresh doesn't re-submit.
+### 8. HubSpot fetch errors on the detail page
+The detail page calls a remote HubSpot endpoint at request time, so
+it can fail (network, 4xx, bad list id). The view catches any
+exception and renders an inline error banner instead of crashing the
+page. The Start / Pause / Done buttons still work in this state so
+the user can pause / move on without the dashboard becoming wedged.
+
+### 9. Flash messages
+Flashes use Flask's `url_for(..., flash=...)` so the query string is
+properly URL-encoded; they're rendered through autoescape so they
+are XSS-safe even if a value comes from user input.
 
 ## Routes
 
 | Method + path | Purpose |
 |---|---|
 | `GET  /` | Redirect to `/campaigns/`. |
-| `GET  /campaigns/` | List campaigns (id, name, status, contact count). Form to create a new campaign (name + CSV textarea). |
-| `POST /campaigns/` | Create a campaign and insert its contacts. Redirect to the new campaign's detail page. |
-| `GET  /campaigns/<id>` | Detail page: contacts table + Start / Pause / Done buttons. |
+| `GET  /campaigns/` | List campaigns (id, name, list id, status, created). Form to create a new campaign (name + HubSpot list id). |
+| `POST /campaigns/` | Create a campaign. Redirect to the new campaign's detail page. |
+| `GET  /campaigns/<id>` | Detail page: contacts table (live from HubSpot) + Start / Pause / Done buttons. |
 | `POST /campaigns/<id>/status` | Set the campaign's status. Redirect back to detail. |
 | `GET  /healthz` | Trivial liveness probe. |
 
@@ -137,21 +134,20 @@ No JSON API, no per-contact actions, no exports, no recording playback
 
 ## Verification (manual)
 
-1. Apply migrations: `python state.py` — self-test must still print
-   `state.py self-test PASS` and now also verify the campaign tables.
+1. Apply migrations: `python state.py` — self-test must print
+   `state.py self-test PASS` (covers campaigns table, `hubspot_list_id`
+   column, status enum, `get_active_campaign`, `phone_call_stats`).
 2. Boot the dashboard: `flask --app dashboard run --port 5001`.
 3. Open `http://localhost:5001/campaigns/`. Create a campaign named
-   "smoke" with two pasted lines:
-   ```
-   Alice,555-111-2222
-   555-333-4444
-   ```
-   Confirm the detail page shows two rows, both with attempt count
-   `0`, status `paused`.
+   "smoke" with the HubSpot list id of a list that has 1–2 contacts in
+   it. Confirm the detail page shows those HubSpot contacts with
+   attempt count `0` and status `paused`.
 4. Click **Start**. Confirm status flips to `active`.
-5. Run `python scheduler.py --dry-run`. Confirm it lists the two
-   campaign phones (attempt 1) and *not* HubSpot contacts.
-6. Click **Pause** on the campaign. Run `python scheduler.py --dry-run`
-   again. Confirm it falls back to the HubSpot list path.
+5. Run `python scheduler.py --dry-run`. Confirm the log line
+   `[scheduler] source: campaign <id> (HubSpot list <list_id>)` and
+   that it lists the campaign's contacts, not the env-default list.
+6. Click **Pause**. Run `python scheduler.py --dry-run` again.
+   Confirm `[scheduler] source: HubSpot list (default)` and that it
+   uses the env-configured `HUBSPOT_LIST_ID`.
 7. Click **Done**. Confirm status flips to `done` and the dry-run
-   again uses the HubSpot list.
+   again uses the env-default list.
