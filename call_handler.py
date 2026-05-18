@@ -3,13 +3,14 @@
 Endpoints
 ---------
 
-* ``POST /voice`` — Twilio's main TwiML webhook. With synchronous AMD
-  enabled on the outbound call, Twilio holds this request until AMD
-  completes and includes ``AnsweredBy`` in the form body. We branch:
+* ``POST /voice`` — Twilio's main TwiML webhook. AMD runs in ``Enable``
+  mode (fast detection), so Twilio includes ``AnsweredBy`` in the form
+  body. We branch:
 
-  * machine_*  → ``<Play>{VOICEMAIL_RECORDING_URL}</Play><Hangup/>``
-                 and log outcome ``Voicemail Left``.
-  * human / unknown → ``<Hangup/>`` and log ``Human Answered``.
+  * machine_* / unknown → 5 s pause then
+                          ``<Play>{VOICEMAIL_RECORDING_URL}</Play><Hangup/>``
+                          and log outcome ``Voicemail Left``.
+  * human → ``<Hangup/>`` and log ``Human Answered``.
   * fax → ``<Hangup/>`` and log ``Failed``.
 
   ``unknown`` is treated as human, conservatively: better to skip a
@@ -55,7 +56,11 @@ def _twiml(body: str) -> Response:
 def _play_and_hangup(recording_url: str) -> Response:
     # Escape ampersands in the URL — TwiML is XML.
     safe_url = recording_url.replace("&", "&amp;")
-    return _twiml(f"<Play>{safe_url}</Play><Hangup/>")
+    # Pause 20 s so the voicemail greeting can finish before we play.
+    # AMD's "Enable" mode returns machine_start as soon as it detects a
+    # machine, often well before the greeting ends. A long pause is the
+    # cheapest way to land our recording after the beep.
+    return _twiml(f'<Pause length="20"/><Play>{safe_url}</Play><Hangup/>')
 
 
 def _silent_hangup() -> Response:
@@ -80,7 +85,11 @@ def _outcome_for_answered_by(answered_by: str) -> str:
         return state.OUTCOME_VOICEMAIL_LEFT
     if answered_by == "fax":
         return state.OUTCOME_FAILED
-    # 'human', 'unknown', and anything unexpected: assume human.
+    # 'unknown': AMD couldn't determine — treat as machine so we still
+    # drop the voicemail rather than silently abandoning the call.
+    if answered_by == "unknown":
+        return state.OUTCOME_VOICEMAIL_LEFT
+    # 'human' and anything unexpected: hang up silently.
     return state.OUTCOME_HUMAN_ANSWERED
 
 
