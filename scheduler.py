@@ -105,9 +105,6 @@ def pending_contacts(
             skipped.append((c, f"no usable phone (raw={c.get('phone')!r})"))
             continue
         attempts = count_attempts(cid)
-        if attempts >= MAX_ATTEMPTS:
-            skipped.append((c, f"{attempts} attempts already made"))
-            continue
         # Attach the normalised phone so run_once doesn't redo the work.
         c = {**c, "_phone_e164": phone, "_attempts_before": attempts}
         to_call.append(c)
@@ -169,7 +166,7 @@ def run_once(
         for c in to_call:
             print(
                 f"[scheduler] would call {_describe(c)} -> {c['_phone_e164']} "
-                f"(attempt {c['_attempts_before'] + 1} of {MAX_ATTEMPTS})",
+                f"(attempt {c['_attempts_before'] + 1})",
                 flush=True,
             )
         print(
@@ -183,7 +180,7 @@ def run_once(
     for i, c in enumerate(to_call):
         print(
             f"[scheduler] dialing {_describe(c)} -> {c['_phone_e164']} "
-            f"(attempt {c['_attempts_before'] + 1} of {MAX_ATTEMPTS})",
+            f"(attempt {c['_attempts_before'] + 1})",
             flush=True,
         )
         try:

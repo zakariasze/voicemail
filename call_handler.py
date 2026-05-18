@@ -3,15 +3,15 @@
 Endpoints
 ---------
 
-* ``POST /voice`` — Twilio's main TwiML webhook. AMD runs in ``Enable``
-  mode (fast detection), so Twilio includes ``AnsweredBy`` in the form
-  body. We branch:
+* ``POST /voice`` — Twilio's main TwiML webhook. AMD runs in
+  ``DetectMessageEnd`` mode: Twilio waits for the beep before calling
+  this endpoint, so we play the recording immediately with no pause.
+  We branch on ``AnsweredBy``:
 
-  * machine_* / unknown → 5 s pause then
-                          ``<Play>{VOICEMAIL_RECORDING_URL}</Play><Hangup/>``
-                          and log outcome ``Voicemail Left``.
+  * machine_*  → ``<Play>{VOICEMAIL_RECORDING_URL}</Play><Hangup/>``
+                 and log outcome ``Voicemail Left``.
   * human → ``<Hangup/>`` and log ``Human Answered``.
-  * fax → ``<Hangup/>`` and log ``Failed``.
+  * fax / unknown → ``<Hangup/>`` and log accordingly.
 
   ``unknown`` is treated as human, conservatively: better to skip a
   drop than play a recording at a real person.
@@ -56,11 +56,9 @@ def _twiml(body: str) -> Response:
 def _play_and_hangup(recording_url: str) -> Response:
     # Escape ampersands in the URL — TwiML is XML.
     safe_url = recording_url.replace("&", "&amp;")
-    # Pause 20 s so the voicemail greeting can finish before we play.
-    # AMD's "Enable" mode returns machine_start as soon as it detects a
-    # machine, often well before the greeting ends. A long pause is the
-    # cheapest way to land our recording after the beep.
-    return _twiml(f'<Pause length="20"/><Play>{safe_url}</Play><Hangup/>')
+    # With DetectMessageEnd, Twilio waits for the beep before calling
+    # /voice, so we play immediately with no pause needed.
+    return _twiml(f"<Play>{safe_url}</Play><Hangup/>")
 
 
 def _silent_hangup() -> Response:
@@ -85,10 +83,10 @@ def _outcome_for_answered_by(answered_by: str) -> str:
         return state.OUTCOME_VOICEMAIL_LEFT
     if answered_by == "fax":
         return state.OUTCOME_FAILED
-    # 'unknown': AMD couldn't determine — treat as machine so we still
-    # drop the voicemail rather than silently abandoning the call.
+    # 'unknown': with DetectMessageEnd, Twilio does not call /voice for
+    # unknown — this branch is a safety net only.
     if answered_by == "unknown":
-        return state.OUTCOME_VOICEMAIL_LEFT
+        return state.OUTCOME_NO_ANSWER
     # 'human' and anything unexpected: hang up silently.
     return state.OUTCOME_HUMAN_ANSWERED
 
