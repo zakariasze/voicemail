@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 # README outcomes — kept here as the single source of truth so other
@@ -348,18 +348,29 @@ def phone_call_stats(phones: list[str]) -> dict[str, dict]:
     """Look up call stats for a batch of phone numbers.
 
     Returns a ``{phone: {"attempt_count": int, "last_outcome": str|None,
-    "last_call_at": str|None}}`` map. Phones not present in the
-    ``calls`` table are returned with ``attempt_count=0`` and ``None``
-    for the other two fields. Used by the dashboard detail page to
-    decorate live HubSpot contacts with their local call history.
+    "last_call_at": str|None, "in_progress": bool}}`` map. Phones not
+    present in the ``calls`` table are returned with ``attempt_count=0``,
+    ``in_progress=False`` and ``None`` for the other two fields.
+
+    ``in_progress`` is ``True`` iff a row exists for that phone with
+    ``outcome IS NULL`` and ``created_at`` within the last 5 minutes —
+    i.e. the call has been placed but no terminal webhook has landed
+    yet. The 5-minute cap protects against rows that get orphaned if
+    Twilio never calls back (we'd otherwise show a spinner forever).
     """
     out: dict[str, dict] = {
-        p: {"attempt_count": 0, "last_outcome": None, "last_call_at": None}
+        p: {
+            "attempt_count": 0,
+            "last_outcome": None,
+            "last_call_at": None,
+            "in_progress": False,
+        }
         for p in phones if p
     }
     if not out:
         return out
     placeholders = ",".join("?" for _ in out)
+    phone_tuple = tuple(out.keys())
     with _connect() as conn:
         rows = conn.execute(
             f"SELECT to_number, "
@@ -368,7 +379,7 @@ def phone_call_stats(phones: list[str]) -> dict[str, dict]:
             f"FROM calls "
             f"WHERE to_number IN ({placeholders}) "
             f"GROUP BY to_number",
-            tuple(out.keys()),
+            phone_tuple,
         ).fetchall()
         for r in rows:
             d = out[r["to_number"]]
@@ -379,7 +390,7 @@ def phone_call_stats(phones: list[str]) -> dict[str, dict]:
             f"SELECT to_number, outcome FROM calls "
             f"WHERE to_number IN ({placeholders}) AND outcome IS NOT NULL "
             f"ORDER BY updated_at DESC",
-            tuple(out.keys()),
+            phone_tuple,
         ).fetchall()
         seen: set[str] = set()
         for r in rows:
@@ -388,6 +399,21 @@ def phone_call_stats(phones: list[str]) -> dict[str, dict]:
                 continue
             seen.add(phone)
             out[phone]["last_outcome"] = r["outcome"]
+        # In-progress: any row with outcome NULL placed in the last 5
+        # minutes. SQLite stores ISO 8601 UTC strings; lexical compare
+        # works because the format is fixed-width and timezone-stable.
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=5)
+        ).isoformat(timespec="seconds")
+        rows = conn.execute(
+            f"SELECT DISTINCT to_number FROM calls "
+            f"WHERE to_number IN ({placeholders}) "
+            f"  AND outcome IS NULL "
+            f"  AND created_at >= ?",
+            phone_tuple + (cutoff,),
+        ).fetchall()
+        for r in rows:
+            out[r["to_number"]]["in_progress"] = True
     return out
 
 
@@ -469,9 +495,24 @@ def _self_test() -> int:
         assert stats["+15550000001"]["attempt_count"] == 1
         assert stats["+15550000001"]["last_outcome"] == OUTCOME_VOICEMAIL_LEFT
         assert stats["+15550000001"]["last_call_at"] is not None
+        assert stats["+15550000001"]["in_progress"] is False
         assert stats["+15559999999"]["attempt_count"] == 0
         assert stats["+15559999999"]["last_outcome"] is None
+        assert stats["+15559999999"]["in_progress"] is False
         assert "" not in stats
+
+        # In-progress: a freshly-placed row with NULL outcome shows up
+        # as in_progress=True for that phone.
+        record_call_placed(
+            "CA_LIVE", to_number="+15558887777", hubspot_contact_id="C-LIVE",
+        )
+        stats = phone_call_stats(["+15558887777"])
+        assert stats["+15558887777"]["in_progress"] is True
+        # Once an outcome lands, in_progress flips back to False.
+        record_outcome("CA_LIVE", outcome=OUTCOME_VOICEMAIL_LEFT)
+        stats = phone_call_stats(["+15558887777"])
+        assert stats["+15558887777"]["in_progress"] is False
+        assert stats["+15558887777"]["last_outcome"] == OUTCOME_VOICEMAIL_LEFT
 
         # Active campaign lookup.
         set_campaign_status(cid, CAMPAIGN_ACTIVE)

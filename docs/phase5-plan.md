@@ -149,5 +149,33 @@ No JSON API, no per-contact actions, no exports, no recording playback
 6. Click **Pause**. Run `python scheduler.py --dry-run` again.
    Confirm `[scheduler] source: HubSpot list (default)` and that it
    uses the env-configured `HUBSPOT_LIST_ID`.
-7. Click **Done**. Confirm status flips to `done` and the dry-run
-   again uses the env-default list.
+## UI upgrade (follow-up iteration)
+
+After the HubSpot-list pivot the user asked for a more polished look
+and **live** call status. Notable changes:
+
+* Modern product-look styling in `dashboard.py` — header bar with a
+  brand mark, card-based sections, status pills, refined typography
+  and shadows. Still pure CSS in a single inline `<style>` block, no
+  framework dependency.
+* In-progress detection added to `state.phone_call_stats`:
+  `in_progress=True` when a row exists for the phone with
+  `outcome IS NULL` and `created_at` within the last 5 minutes (the
+  cap protects against orphaned rows if a Twilio webhook never
+  arrives).
+* New JSON feed `GET /campaigns/<id>/contacts.json` returns the same
+  decorated contacts the HTML view does, plus the current campaign
+  status. HubSpot fetch errors are reported as
+  `{"error": "hubspot_unavailable"}` so the client can render a
+  reconnecting state without leaking upstream response bodies.
+* Detail page polls the JSON feed every 2.5 s and updates rows in
+  place: spinner + "Dialing…" label appears next to the phone of the
+  contact currently being dialled, and is replaced by the outcome
+  pill ("Voicemail Left", "Human Answered", …) as soon as the
+  `/status` webhook records the outcome.
+* Footer shows a pulsing "Live" indicator that switches to
+  "Reconnecting…" if the feed fails.
+
+The feed is read-only and the page never adds or removes rows on the
+client — the HubSpot list remains the source of truth and is
+re-fetched on each full page load.
