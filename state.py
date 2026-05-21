@@ -36,6 +36,7 @@ from typing import Iterator
 # modules can import and compare against them.
 OUTCOME_VOICEMAIL_LEFT = "Voicemail Left"
 OUTCOME_HUMAN_ANSWERED = "Human Answered"
+OUTCOME_TRANSFERRED = "Transferred"
 OUTCOME_NO_ANSWER = "No Answer"
 OUTCOME_BUSY = "Busy"
 OUTCOME_FAILED = "Failed"
@@ -43,6 +44,7 @@ OUTCOME_FAILED = "Failed"
 ALL_OUTCOMES = {
     OUTCOME_VOICEMAIL_LEFT,
     OUTCOME_HUMAN_ANSWERED,
+    OUTCOME_TRANSFERRED,
     OUTCOME_NO_ANSWER,
     OUTCOME_BUSY,
     OUTCOME_FAILED,
@@ -91,6 +93,10 @@ CAMPAIGN_STATUSES = {CAMPAIGN_ACTIVE, CAMPAIGN_PAUSED, CAMPAIGN_DONE}
 _MIGRATIONS: list[tuple[str, str]] = [
     ("hubspot_contact_id", "ALTER TABLE calls ADD COLUMN hubspot_contact_id TEXT"),
     ("hubspot_logged_at",  "ALTER TABLE calls ADD COLUMN hubspot_logged_at TEXT"),
+    # Stamped by ``mark_sms_sent`` after the voicemail follow-up SMS is
+    # placed with Twilio. Used to keep retries idempotent and to surface
+    # the "VM + SMS" state on the dashboard.
+    ("sms_sent_at",        "ALTER TABLE calls ADD COLUMN sms_sent_at TEXT"),
 ]
 
 # Additive migrations for the campaigns table (added after the initial
@@ -243,6 +249,24 @@ def mark_hubspot_logged(call_sid: str) -> None:
         conn.execute(
             "UPDATE calls SET hubspot_logged_at=?, updated_at=? "
             "WHERE call_sid=?",
+            (now, now, call_sid),
+        )
+
+
+def mark_sms_sent(call_sid: str) -> None:
+    """Stamp ``sms_sent_at`` so we don't double-send the voicemail SMS.
+
+    Called after the follow-up SMS placed in ``/voice`` (for a voicemail
+    outcome) has been accepted by Twilio. Twilio occasionally retries
+    ``/voice`` for the same ``CallSid``; checking this column makes the
+    send idempotent.
+    """
+    if not call_sid:
+        raise ValueError("call_sid is required")
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE calls SET sms_sent_at=?, updated_at=? WHERE call_sid=?",
             (now, now, call_sid),
         )
 

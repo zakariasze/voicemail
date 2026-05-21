@@ -67,6 +67,66 @@ def voicemail_recording_url() -> str | None:
     return get("VOICEMAIL_RECORDING_URL")
 
 
+# --- Live-pickup / transfer to closers -------------------------------------
+# When AMD reports ``human``, ``/voice`` plays a short hold message and
+# simultaneously dials every number in ``closer_numbers()``. First closer
+# to pick up gets the call; the rest are released. If nobody answers
+# within ``transfer_ring_timeout_seconds()`` we play a courteous goodbye
+# and hang up cleanly.
+
+def closer_numbers() -> list[str]:
+    """Comma-separated E.164 numbers to ring on a live human pickup.
+
+    Returns an empty list when unset, in which case ``/voice`` falls back
+    to the silent-hangup behavior — the system stays useful even before
+    the closer team is wired up.
+    """
+    raw = get("CLOSER_NUMBERS", "") or ""
+    return [n.strip() for n in raw.split(",") if n.strip()]
+
+
+def hold_recording_url() -> str | None:
+    """Public URL of the short 'Please hold…' .mp3 to play to a human.
+
+    Optional: when unset, ``/voice`` uses a built-in ``<Say>`` fallback.
+    """
+    return get("HOLD_RECORDING_URL")
+
+
+def goodbye_recording_url() -> str | None:
+    """Public URL of the courteous goodbye .mp3 used when no closer
+    picks up within the ring window. Optional: ``<Say>`` fallback."""
+    return get("GOODBYE_RECORDING_URL")
+
+
+def transfer_ring_timeout_seconds() -> int:
+    """Seconds the closers' phones ring before we give up and hang up.
+
+    Per the workflow overview: ~20 seconds. Configurable so the team can
+    tune it without a code change.
+    """
+    raw = get("TRANSFER_RING_TIMEOUT_SECONDS", "20") or "20"
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 20
+
+
+# --- Voicemail follow-up SMS -----------------------------------------------
+
+def sms_followup_body() -> str:
+    """Body of the SMS sent automatically after a voicemail is left.
+
+    Falls back to a short generic message so the system stays useful
+    out of the box.
+    """
+    return get(
+        "SMS_FOLLOWUP_BODY",
+        "Hi — we just left you a voicemail. Reply or call back when you "
+        "get a chance, thanks!",
+    ) or ""
+
+
 def hubspot_api_key() -> str:
     """HubSpot private-app token, sent as ``Authorization: Bearer …``."""
     return require("HUBSPOT_API_KEY")

@@ -261,6 +261,9 @@ _BASE_HEAD = """<!doctype html>
   .out-hum  { color: var(--primary);
               background: var(--primary-soft);
               border-color: rgba(47, 111, 235, 0.2); }
+  .out-trans { color: var(--success);
+              background: var(--success-soft);
+              border-color: rgba(10, 125, 44, 0.18); }
   .out-no   { color: var(--warning);
               background: var(--warning-soft);
               border-color: rgba(179, 89, 0, 0.18); }
@@ -473,6 +476,8 @@ _OUTCOME_PILL_MACRO = """
     <span class="pill out-vm"><span class="dot"></span>Voicemail Left</span>
   {%- elif outcome == 'Human Answered' -%}
     <span class="pill out-hum"><span class="dot"></span>Human Answered</span>
+  {%- elif outcome == 'Transferred' -%}
+    <span class="pill out-trans"><span class="dot"></span>Transferred</span>
   {%- elif outcome == 'No Answer' -%}
     <span class="pill out-no"><span class="dot"></span>No Answer</span>
   {%- elif outcome == 'Busy' -%}
@@ -693,6 +698,7 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
     var map = {
       "Voicemail Left": "out-vm",
       "Human Answered": "out-hum",
+      "Transferred":    "out-trans",
       "No Answer":      "out-no",
       "Busy":           "out-bus",
       "Failed":         "out-fail"

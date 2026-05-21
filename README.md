@@ -37,9 +37,9 @@ Automate cold-call outreach to dental practices. The system reads a contact list
 2. **6:05 AM** — Schedules each contact for two call attempts in their own time zone: 10:00–11:30 AM local, 2:00–3:30 PM local.
 3. **10:00 AM onward** — Calls go out automatically via Twilio. No one needs to be at a desk.
 4. **Each call** — Answering Machine Detection (AMD) determines who/what picked up:
-   - **Voicemail detected** → play the pre-recorded `.mp3` message in full, then hang up. Log as `Voicemail Left`.
+   - **Voicemail detected** → play the pre-recorded `.mp3` message in full, then hang up. Log as `Voicemail Left`. A follow-up **SMS is sent automatically** to the same number reinforcing the voicemail and asking for a callback.
    - **No answer / rang out** → Log as `No Answer`.
-   - **Human detected** → hang up silently. Log as `Human Answered` and flag for human follow-up.
+   - **Human detected** → play a short *"please hold…"* message and simultaneously ring every number in `CLOSER_NUMBERS`. First closer to answer is bridged in; the rest are released. If nobody picks up within `TRANSFER_RING_TIMEOUT_SECONDS` (default 20s) a courteous goodbye plays and the call ends cleanly. Log as `Transferred` when a closer answered, otherwise `Human Answered`.
    - **Failed / busy / bad number** → Log as `Failed` or `Busy`.
 5. **After each call** — A call activity is added to the contact's HubSpot timeline. Two contact properties are updated: `Last Call Attempt` (datetime) and `Last Call Outcome` (enum).
 6. **End of day** — A simple dashboard page shows: total dialed, outcome breakdown, and which contacts need human follow-up.

@@ -50,6 +50,7 @@ ASSOC_TYPE_CALL_TO_CONTACT = 194
 _OUTCOME_OPTIONS = [
     "Voicemail Left",
     "Human Answered",
+    "Transferred",
     "No Answer",
     "Busy",
     "Failed",

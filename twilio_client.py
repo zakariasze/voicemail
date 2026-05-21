@@ -79,6 +79,37 @@ def place_call(to_number: str, *, hubspot_contact_id: str | None = None) -> str:
     return call.sid
 
 
+def send_sms(to_number: str, body: str) -> str | None:
+    """Send a single SMS message via Twilio. Returns the message SID.
+
+    Used by ``call_handler.py`` to fire the post-voicemail follow-up
+    text described in ``workflow overview.pdf``:
+
+        "An SMS is sent to the same number within seconds: a short
+         follow-up message reinforcing the voicemail and asking them
+         to call back."
+
+    Failures are caught and logged, returning ``None`` — the SMS is a
+    nice-to-have follow-up and must never break the call flow.
+    """
+    if not to_number:
+        raise ValueError("to_number is required")
+    if not body:
+        print("[twilio_client] send_sms: empty body, skipping send.")
+        return None
+    try:
+        msg = _client().messages.create(
+            to=to_number,
+            from_=config.twilio_from_number(),
+            body=body,
+        )
+        print(f"[twilio_client] sent SMS sid={msg.sid} to={to_number}")
+        return msg.sid
+    except Exception as exc:  # noqa: BLE001 - never let SMS break the call
+        print(f"[twilio_client] ERROR sending SMS to {to_number}: {exc}")
+        return None
+
+
 def _main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("Usage: python twilio_client.py <E.164 number, e.g. +15551234567>")

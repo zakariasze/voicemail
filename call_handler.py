@@ -9,12 +9,26 @@ Endpoints
   We branch on ``AnsweredBy``:
 
   * machine_*  → ``<Play>{VOICEMAIL_RECORDING_URL}</Play><Hangup/>``
-                 and log outcome ``Voicemail Left``.
-  * human → ``<Hangup/>`` and log ``Human Answered``.
+                 and log outcome ``Voicemail Left``. A follow-up SMS
+                 is fired in a background thread so the TwiML response
+                 stays fast.
+  * human → play a short "please hold" message and simultaneously
+                 ring every number in ``CLOSER_NUMBERS``. Twilio's
+                 ``<Dial>`` action callback (``/transfer-status``)
+                 finalizes the outcome: ``Transferred`` if a closer
+                 answered, otherwise a courteous goodbye and the row
+                 stays at ``Human Answered`` (we tried, we missed).
+                 With no closers configured we fall back to a silent
+                 hangup so the system stays useful pre-rollout.
   * fax / unknown → ``<Hangup/>`` and log accordingly.
 
-  ``unknown`` is treated as human, conservatively: better to skip a
-  drop than play a recording at a real person.
+  ``unknown`` is treated as ``No Answer``, conservatively: better to
+  skip a drop than play a recording at a real person.
+
+* ``POST /transfer-status`` — ``action`` callback on the human-pickup
+  ``<Dial>``. Sets ``Transferred`` when ``DialCallStatus == completed``;
+  otherwise plays the goodbye recording. Always closes the parent leg
+  with ``<Hangup/>``.
 
 * ``POST /status`` — Twilio's call ``statusCallback``. Fires once at
   the end of every call regardless of outcome. Records terminal call
@@ -31,6 +45,9 @@ Run with:
 """
 
 from __future__ import annotations
+
+import threading
+from xml.sax.saxutils import escape as _xml_escape
 
 from flask import Flask, Response, request
 
@@ -53,12 +70,15 @@ def _twiml(body: str) -> Response:
     return Response(f"{_XML_HEADER}<Response>{body}</Response>", mimetype="text/xml")
 
 
+def _xml_url(url: str) -> str:
+    # Escape ampersands and other XML-significant characters in URLs.
+    return _xml_escape(url)
+
+
 def _play_and_hangup(recording_url: str) -> Response:
-    # Escape ampersands in the URL — TwiML is XML.
-    safe_url = recording_url.replace("&", "&amp;")
     # With DetectMessageEnd, Twilio waits for the beep before calling
     # /voice, so we play immediately with no pause needed.
-    return _twiml(f"<Play>{safe_url}</Play><Hangup/>")
+    return _twiml(f"<Play>{_xml_url(recording_url)}</Play><Hangup/>")
 
 
 def _silent_hangup() -> Response:
@@ -66,6 +86,18 @@ def _silent_hangup() -> Response:
     # error has occurred" prompt that fires when the first verb is a
     # bare <Hangup/>.
     return _twiml("<Pause length=\"1\"/><Hangup/>")
+
+
+def _play_or_say(url: str | None, fallback_text: str) -> str:
+    """Render a ``<Play>`` for ``url`` if set, else a ``<Say>`` fallback.
+
+    Keeps the system usable before the team has uploaded recordings for
+    the hold message and goodbye message — the call flow still works,
+    just with Twilio's TTS voice instead of the polished human take.
+    """
+    if url:
+        return f"<Play>{_xml_url(url)}</Play>"
+    return f"<Say>{_xml_escape(fallback_text)}</Say>"
 
 
 # --- AnsweredBy → outcome mapping -----------------------------------------
@@ -87,7 +119,7 @@ def _outcome_for_answered_by(answered_by: str) -> str:
     # unknown — this branch is a safety net only.
     if answered_by == "unknown":
         return state.OUTCOME_NO_ANSWER
-    # 'human' and anything unexpected: hang up silently.
+    # 'human' and anything unexpected: a real person picked up.
     return state.OUTCOME_HUMAN_ANSWERED
 
 
@@ -99,8 +131,43 @@ _STATUS_TO_OUTCOME = {
     "failed": state.OUTCOME_FAILED,
     "canceled": state.OUTCOME_FAILED,
     # 'completed' intentionally absent — /voice already set the real
-    # outcome (Voicemail Left / Human Answered / Failed for fax).
+    # outcome (Voicemail Left / Human Answered / Transferred /
+    # Failed for fax).
 }
+
+
+# --- Background SMS follow-up ---------------------------------------------
+
+def _send_followup_sms_async(call_sid: str, to_number: str) -> None:
+    """Fire the post-voicemail SMS in a daemon thread.
+
+    Kicked off from ``/voice`` so the TwiML response (which starts the
+    recording playback) is not blocked on a Twilio REST round-trip.
+    Idempotent: re-checks ``sms_sent_at`` so Twilio retries of ``/voice``
+    don't double-send.
+    """
+    body = config.sms_followup_body()
+    if not body or not to_number:
+        return
+
+    def _run() -> None:
+        # Re-read the row inside the thread to catch the case where a
+        # concurrent retry has already stamped sms_sent_at.
+        row = state.get(call_sid)
+        if row and row.get("sms_sent_at"):
+            return
+        try:
+            import twilio_client  # local import: keeps cold start light
+            sid = twilio_client.send_sms(to_number, body)
+            if sid:
+                state.mark_sms_sent(call_sid)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[voice] ERROR firing follow-up SMS for {call_sid}: {exc}",
+                flush=True,
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # --- Endpoints -------------------------------------------------------------
@@ -135,9 +202,93 @@ def voice() -> Response:
                 flush=True,
             )
             return _silent_hangup()
+        # Fire the SMS follow-up in the background so the recording
+        # starts playing without waiting on Twilio's REST API.
+        _send_followup_sms_async(call_sid, to_number)
         return _play_and_hangup(recording_url)
 
+    if outcome == state.OUTCOME_HUMAN_ANSWERED:
+        return _live_pickup_twiml()
+
     return _silent_hangup()
+
+
+def _live_pickup_twiml() -> Response:
+    """Build the TwiML for a live human pickup.
+
+    Plays a short "please hold" message and then ``<Dial>``s every
+    configured closer number simultaneously. First closer to answer
+    gets bridged in; the rest are released. After the dial completes
+    (success or timeout), Twilio POSTs the result to
+    ``/transfer-status`` which decides the final outcome.
+
+    If no closers are configured, we degrade to a silent hangup so
+    the system stays useful before the team is wired up.
+    """
+    numbers = config.closer_numbers()
+    if not numbers:
+        print(
+            "[voice] human pickup but CLOSER_NUMBERS is empty; "
+            "hanging up silently.",
+            flush=True,
+        )
+        return _silent_hangup()
+
+    hold = _play_or_say(
+        config.hold_recording_url(),
+        "Please hold while we connect you.",
+    )
+    timeout = config.transfer_ring_timeout_seconds()
+    base = config.webhook_base_url()
+    action_url = f"{base}/transfer-status"
+    number_tags = "".join(
+        f"<Number>{_xml_escape(n)}</Number>" for n in numbers
+    )
+    # ringAll behavior: <Dial> with multiple <Number> children rings
+    # them all in parallel by default. answerOnBridge=true keeps the
+    # caller's call alive (and the recording side hears ringback) until
+    # one of the closers actually answers.
+    dial = (
+        f'<Dial timeout="{timeout}" answerOnBridge="true" '
+        f'action="{_xml_escape(action_url)}" method="POST">'
+        f"{number_tags}"
+        f"</Dial>"
+    )
+    return _twiml(hold + dial)
+
+
+@app.post("/transfer-status")
+def transfer_status() -> Response:
+    """Action callback for the live-pickup ``<Dial>``.
+
+    Twilio POSTs here once the dial completes. ``DialCallStatus`` tells
+    us whether any closer answered:
+
+    * ``completed`` — a closer answered and the call has now ended;
+      mark the row ``Transferred`` and hang up the parent leg.
+    * anything else (``no-answer``, ``busy``, ``failed``, ``canceled``)
+      — nobody picked up in time; play the goodbye recording and end
+      the call cleanly. The outcome stays ``Human Answered`` (we did
+      reach a person, we just missed the transfer).
+    """
+    call_sid = request.values.get("CallSid", "")
+    dial_status = request.values.get("DialCallStatus", "") or ""
+    print(
+        f"[transfer-status] CallSid={call_sid} DialCallStatus={dial_status}",
+        flush=True,
+    )
+
+    if dial_status == "completed":
+        state.record_outcome(call_sid, outcome=state.OUTCOME_TRANSFERRED)
+        # Nothing more to do; the bridged call has already ended.
+        return _twiml("<Hangup/>")
+
+    goodbye = _play_or_say(
+        config.goodbye_recording_url(),
+        "Sorry we couldn't connect you right now. We'll try again soon. "
+        "Goodbye.",
+    )
+    return _twiml(goodbye + "<Hangup/>")
 
 
 @app.post("/status")
