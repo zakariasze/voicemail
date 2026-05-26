@@ -437,6 +437,80 @@ _BASE_HEAD = """<!doctype html>
     100% { box-shadow: 0 0 0 0 rgba(10, 125, 44, 0); }
   }
 
+  /* Campaign metrics dashboard */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+  }
+  .metric-tile {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .metric-tile .metric-label {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .metric-tile .metric-value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .metric-tile .metric-sub {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+  .metric-tile.accent-primary .metric-value { color: var(--primary); }
+  .metric-tile.accent-success .metric-value { color: var(--success); }
+  .metric-tile.accent-warning .metric-value { color: var(--warning); }
+  .metric-tile.accent-danger  .metric-value { color: var(--danger); }
+  .metric-progress {
+    margin-top: 0.4rem;
+    height: 6px;
+    width: 100%;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .metric-progress > span {
+    display: block;
+    height: 100%;
+    background: var(--primary);
+    transition: width 0.3s ease;
+  }
+  .outcomes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.6rem;
+    margin-top: 1rem;
+  }
+  .outcome-tile {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 0.8rem;
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .outcome-tile .outcome-count {
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
   .footer {
     display: flex;
     align-items: center;
@@ -634,6 +708,58 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
   </div>
 </section>
 
+<section class="card" id="metrics-card">
+  <header class="card-header">
+    <h2 class="card-title">Campaign metrics</h2>
+    <span class="cell-muted">Live overview</span>
+  </header>
+  <div class="card-body">
+    <div class="metrics-grid">
+      <div class="metric-tile">
+        <span class="metric-label">Total contacts</span>
+        <span class="metric-value" data-metric="total">{{ metrics.total }}</span>
+        <span class="metric-sub">From HubSpot list</span>
+      </div>
+      <div class="metric-tile accent-success">
+        <span class="metric-label">Called</span>
+        <span class="metric-value" data-metric="called">{{ metrics.called }}</span>
+        <span class="metric-sub">
+          <span data-metric="reach_pct">{{ metrics.reach_pct }}</span>% reach
+        </span>
+        <div class="metric-progress" aria-hidden="true">
+          <span data-metric-bar="reach"
+                style="width: {{ metrics.reach_pct }}%"></span>
+        </div>
+      </div>
+      <div class="metric-tile">
+        <span class="metric-label">Not called yet</span>
+        <span class="metric-value" data-metric="not_called">{{ metrics.not_called }}</span>
+        <span class="metric-sub">Remaining</span>
+      </div>
+      <div class="metric-tile accent-primary">
+        <span class="metric-label">In progress</span>
+        <span class="metric-value" data-metric="in_progress">{{ metrics.in_progress }}</span>
+        <span class="metric-sub">Dialing right now</span>
+      </div>
+      <div class="metric-tile">
+        <span class="metric-label">Total attempts</span>
+        <span class="metric-value" data-metric="total_attempts">{{ metrics.total_attempts }}</span>
+        <span class="metric-sub">Calls placed</span>
+      </div>
+    </div>
+
+    <div class="outcomes-grid">
+      {% for name in metrics.outcome_order %}
+      <div class="outcome-tile">
+        {{ outcome_pill(name) }}
+        <span class="outcome-count"
+              data-outcome="{{ name }}">{{ metrics.outcomes[name] }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
 <section class="card">
   <header class="card-header">
     <h2 class="card-title">Contacts</h2>
@@ -701,6 +827,59 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
   var liveText = indicator.querySelector(".live-text");
   var POLL_MS = 2500;
 
+  var OUTCOMES = [
+    "Voicemail Left", "Human Answered", "No Answer", "Busy", "Failed"
+  ];
+
+  function computeMetrics(contacts) {
+    var m = {
+      total: contacts.length,
+      called: 0,
+      not_called: 0,
+      in_progress: 0,
+      total_attempts: 0,
+      reach_pct: 0,
+      outcomes: {}
+    };
+    OUTCOMES.forEach(function (o) { m.outcomes[o] = 0; });
+    contacts.forEach(function (c) {
+      var attempts = c.attempt_count || 0;
+      m.total_attempts += attempts;
+      if (attempts > 0) m.called += 1;
+      if (c.in_progress) m.in_progress += 1;
+      if (c.last_outcome && m.outcomes.hasOwnProperty(c.last_outcome)) {
+        m.outcomes[c.last_outcome] += 1;
+      }
+    });
+    m.not_called = Math.max(m.total - m.called, 0);
+    m.reach_pct = m.total ? Math.round((m.called / m.total) * 100) : 0;
+    return m;
+  }
+
+  function setMetricText(name, value) {
+    document
+      .querySelectorAll('[data-metric="' + name + '"]')
+      .forEach(function (el) { el.textContent = String(value); });
+  }
+
+  function updateMetrics(contacts) {
+    var card = document.getElementById("metrics-card");
+    if (!card) return;
+    var m = computeMetrics(contacts);
+    setMetricText("total", m.total);
+    setMetricText("called", m.called);
+    setMetricText("not_called", m.not_called);
+    setMetricText("in_progress", m.in_progress);
+    setMetricText("total_attempts", m.total_attempts);
+    setMetricText("reach_pct", m.reach_pct);
+    var bar = card.querySelector('[data-metric-bar="reach"]');
+    if (bar) bar.style.width = m.reach_pct + "%";
+    OUTCOMES.forEach(function (o) {
+      var el = card.querySelector('[data-outcome="' + o + '"]');
+      if (el) el.textContent = String(m.outcomes[o]);
+    });
+  }
+
   function pillHtml(outcome) {
     if (!outcome) return '<span class="out-none">—</span>';
     var map = {
@@ -754,16 +933,19 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
       .then(function (data) {
         indicator.classList.remove("stale");
         liveText.textContent = "Live";
+        var contactsList = data.contacts || [];
         // Update each row by phone match. We don't add/remove rows;
         // the HubSpot list is a server-rendered snapshot.
         var byPhone = {};
-        (data.contacts || []).forEach(function (c) {
+        contactsList.forEach(function (c) {
           if (c.phone) byPhone[c.phone] = c;
         });
         document.querySelectorAll("#contacts-body tr").forEach(function (row) {
           var p = row.dataset.phone;
           if (p && byPhone[p]) updateRow(row, byPhone[p]);
         });
+        // Refresh the metrics dashboard from the same payload.
+        updateMetrics(contactsList);
         // Status pill (e.g. if user pauses in another tab).
         var statusPill = document.getElementById("campaign-status");
         if (statusPill && data.campaign && data.campaign.status) {
@@ -824,6 +1006,56 @@ def _decorate_contacts(raw_contacts: list[dict]) -> list[dict]:
                 r["last_call_at"] = s["last_call_at"]
                 r["in_progress"] = s["in_progress"]
     return rows
+
+
+# Outcomes we surface as their own tile in the metrics dashboard.
+# Kept in render order so the UI stays stable.
+_METRIC_OUTCOMES: tuple[str, ...] = (
+    "Voicemail Left",
+    "Human Answered",
+    "No Answer",
+    "Busy",
+    "Failed",
+)
+
+
+def _compute_metrics(contacts: list[dict]) -> dict:
+    """Derive campaign-level metrics from decorated contacts.
+
+    Pure read-only aggregation over the rows already produced by
+    :func:`_decorate_contacts` — no DB or HubSpot calls, no impact on
+    existing logic. The detail template renders this server-side and
+    the polling JS recomputes the same shape client-side from
+    ``/contacts.json`` so the dashboard stays live.
+    """
+    total = len(contacts)
+    called = 0
+    in_progress = 0
+    total_attempts = 0
+    outcomes: dict[str, int] = {name: 0 for name in _METRIC_OUTCOMES}
+    for c in contacts:
+        attempts = int(c.get("attempt_count") or 0)
+        total_attempts += attempts
+        if attempts > 0:
+            called += 1
+        if c.get("in_progress"):
+            in_progress += 1
+        outcome = c.get("last_outcome")
+        if outcome in outcomes:
+            outcomes[outcome] += 1
+    not_called = max(total - called, 0)
+    reach_pct = round((called / total) * 100) if total else 0
+    return {
+        "total": total,
+        "called": called,
+        "not_called": not_called,
+        "in_progress": in_progress,
+        "total_attempts": total_attempts,
+        "reach_pct": reach_pct,
+        "outcomes": outcomes,
+        # Ordered list so Jinja can iterate predictably.
+        "outcome_order": list(_METRIC_OUTCOMES),
+    }
 
 
 # --- Routes ----------------------------------------------------------------
@@ -896,6 +1128,7 @@ def campaign_detail(campaign_id: int) -> str:
         _DETAIL_TMPL,
         campaign=campaign,
         contacts=contacts,
+        metrics=_compute_metrics(contacts),
         flash=flash,
         error=error,
         page_title=campaign["name"],
