@@ -513,8 +513,8 @@ _BASE_HEAD = """<!doctype html>
   }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent); }
-    70%  { box-shadow: 0 0 0 8px color-mix(in srgb, var(--success) 0%, transparent); }
-    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 0%, transparent); }
+    70%  { box-shadow: 0 0 0 8px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
   }
 
   /* Campaign metrics dashboard */
@@ -668,11 +668,13 @@ _BASE_HEAD = """<!doctype html>
       transition-duration: 0.001ms !important;
       scroll-behavior: auto !important;
     }
-    .spinner {
-      border-top-color: var(--primary);
-      animation: none;
+    .spinner,
+    .live-indicator .live-dot,
+    tbody tr.in-progress td::after {
+      animation: none !important;
     }
-    .live-indicator .live-dot { animation: none; box-shadow: none; }
+    .spinner { border-top-color: var(--primary); }
+    .live-indicator .live-dot { box-shadow: none; }
     tbody tr.in-progress td::after { display: none; }
   }
 </style>
