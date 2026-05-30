@@ -32,6 +32,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import threading
 
 from flask import Flask, Response, request
@@ -55,11 +56,21 @@ def _twiml(body: str) -> Response:
     return Response(f"{_XML_HEADER}<Response>{body}</Response>", mimetype="text/xml")
 
 
-def _play_and_hangup(recording_url: str) -> Response:
+def _play_and_hangup(recording_url: str, *, intro_url: str | None = None) -> Response:
     # Escape ampersands in the URL — TwiML is XML.
     safe_url = recording_url.replace("&", "&amp;")
     # With DetectMessageEnd, Twilio waits for the beep before calling
     # /voice, so we play immediately with no pause needed.
+    #
+    # If a personalized AI intro was rendered for this call, play it
+    # first. Twilio plays adjacent <Play> verbs back-to-back with no
+    # gap, so the seam is invisible when the intro and body share the
+    # same voice + audio format.
+    if intro_url:
+        safe_intro = intro_url.replace("&", "&amp;")
+        return _twiml(
+            f"<Play>{safe_intro}</Play><Play>{safe_url}</Play><Hangup/>"
+        )
     return _twiml(f"<Play>{safe_url}</Play><Hangup/>")
 
 
@@ -195,7 +206,19 @@ def voice() -> Response:
                 flush=True,
             )
             return _silent_hangup()
-        return _play_and_hangup(recording_url)
+        # Look up the personalized intro URL stashed at placement time.
+        # Falls back to body-only if the row is missing it (intro
+        # disabled, name unusable, render failed, or this call wasn't
+        # placed by us).
+        row = state.get(call_sid) or {}
+        intro_url = row.get("intro_audio_url")
+        if intro_url:
+            print(
+                f"[voice] CallSid={call_sid} playing personalized intro "
+                f"+ body",
+                flush=True,
+            )
+        return _play_and_hangup(recording_url, intro_url=intro_url)
 
     # Anything not classified as a machine (human / unknown / fax) is
     # forwarded. The press-to-accept whisper in /forward-whisper
@@ -380,6 +403,58 @@ def _e164(n: str) -> str:
     return n
 
 
+def _xml_escape(text: str) -> str:
+    """Escape XML special chars for safe embedding inside TwiML text."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _lookup_contact_name(parent_call_sid: str, log_prefix: str) -> str:
+    """Return the HubSpot contact name for the parent call, or "".
+
+    Resolves ParentCallSid → state row → hubspot_contact_id →
+    ``hubspot_client.get_contact``. Any failure (missing row, missing
+    contact id, HubSpot error) yields an empty string; callers decide
+    on a fallback phrasing.
+    """
+    if not parent_call_sid:
+        return ""
+    row = state.get(parent_call_sid)
+    if not row:
+        print(
+            f"{log_prefix} no state row found for ParentCallSid={parent_call_sid}",
+            flush=True,
+        )
+        return ""
+    contact_id = row.get("hubspot_contact_id")
+    if not contact_id:
+        print(f"{log_prefix} no hubspot_contact_id on row", flush=True)
+        return ""
+    try:
+        import hubspot_client
+        contact = hubspot_client.get_contact(str(contact_id))
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"{log_prefix} could not fetch HubSpot contact {contact_id}: {exc}",
+            flush=True,
+        )
+        return ""
+    first_name = contact.get("firstname") or ""
+    last_name = contact.get("lastname") or ""
+    name = f"{first_name} {last_name}".strip()
+    print(
+        f"{log_prefix} contact fetched — firstname={first_name!r} "
+        f"lastname={last_name!r} name={name!r}",
+        flush=True,
+    )
+    return name
+
+
 @app.post("/forward-whisper")
 def forward_whisper() -> Response:
     """Press-to-accept whisper played to each <Number> leg on answer.
@@ -390,6 +465,10 @@ def forward_whisper() -> Response:
     ``<Hangup/>`` and the parent ``<Dial>`` continues ringing the other
     legs or times out — instead of bridging the contact into a
     screening prompt.
+
+    The whisper also announces the HubSpot contact name (looked up via
+    the parent CallSid → state row → hubspot_contact_id) so the
+    priority number knows who is calling before accepting.
     """
     called = request.values.get("Called", "") or request.values.get("To", "")
     parent_call_sid = request.values.get("ParentCallSid", "")
@@ -401,6 +480,12 @@ def forward_whisper() -> Response:
         flush=True,
     )
 
+    name = _lookup_contact_name(parent_call_sid, "[whisper]")
+    if name:
+        prompt = f"Incoming forwarded call from {_xml_escape(name)}. Press any key to accept."
+    else:
+        prompt = "Incoming forwarded call. Press any key to accept."
+
     base = config.webhook_base_url()
     # Pass the called number + parent through so /forward-accept knows
     # which leg confirmed and can fire the P2 SMS when P1 accepts.
@@ -411,7 +496,7 @@ def forward_whisper() -> Response:
     )
     body = (
         f'<Gather numDigits="1" timeout="10" action="{accept_url}" method="POST">'
-        f"<Say>Incoming forwarded call. Press any key to accept.</Say>"
+        f"<Say>{prompt}</Say>"
         f"</Gather>"
         f"<Hangup/>"
     )
@@ -465,44 +550,10 @@ def forward_accept() -> Response:
 def _send_forward_notification_sms(parent_call_sid: str, to_number: str) -> None:
     """Send an SMS to PRIORITY_NUMBER_2 when PRIORITY_NUMBER_1 picks up."""
     print(
-        f"[forward-notify] looking up state row for ParentCallSid={parent_call_sid}",
+        f"[forward-notify] looking up contact for ParentCallSid={parent_call_sid}",
         flush=True,
     )
-    first_name, last_name = "", ""
-    row = state.get(parent_call_sid)
-    if not row:
-        print(
-            f"[forward-notify] WARNING: no state row found for {parent_call_sid}; "
-            "contact name will be 'unknown contact'",
-            flush=True,
-        )
-    else:
-        contact_id = row.get("hubspot_contact_id")
-        print(
-            f"[forward-notify] state row found — to_number={row.get('to_number')} "
-            f"hubspot_contact_id={contact_id}",
-            flush=True,
-        )
-        if contact_id:
-            try:
-                import hubspot_client
-                contact = hubspot_client.get_contact(str(contact_id))
-                first_name = contact.get("firstname") or ""
-                last_name = contact.get("lastname") or ""
-                print(
-                    f"[forward-notify] contact fetched — firstname={first_name!r} "
-                    f"lastname={last_name!r}",
-                    flush=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[forward-notify] could not fetch contact {contact_id}: {exc}", flush=True)
-        else:
-            print(
-                "[forward-notify] no hubspot_contact_id on row; using 'unknown contact'",
-                flush=True,
-            )
-
-    name = f"{first_name} {last_name}".strip() or "unknown contact"
+    name = _lookup_contact_name(parent_call_sid, "[forward-notify]") or "unknown contact"
     body = f"Priority 1 picked up — call is with {name}."
 
     # Normalize bare 10-digit number to E.164
@@ -594,6 +645,27 @@ def forward_status() -> Response:
 @app.get("/healthz")
 def healthz() -> tuple[str, int]:
     return ("ok", 200)
+
+
+@app.get("/audio/<path:filename>")
+def serve_audio(filename: str):
+    """Serve a cached personalized-intro MP3 to Twilio.
+
+    ``audio_cache.cache_path_for_filename`` validates that ``filename``
+    matches the 16-hex-char ``.mp3`` pattern produced by the cache key
+    hash, so this route can't be tricked into serving arbitrary files.
+    """
+    import audio_cache as _audio_cache
+
+    path = _audio_cache.cache_path_for_filename(filename)
+    if not path or not os.path.exists(path):
+        return ("not found", 404)
+    # Stream the bytes back. We don't use Flask's send_from_directory
+    # because the cache dir is configurable and may be relative to CWD;
+    # reading the bytes directly keeps the path-handling explicit.
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return Response(data, mimetype="audio/mpeg")
 
 
 if __name__ == "__main__":

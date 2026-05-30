@@ -94,6 +94,7 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("sms_sent_at",        "ALTER TABLE calls ADD COLUMN sms_sent_at TEXT"),
     ("forwarded_to",       "ALTER TABLE calls ADD COLUMN forwarded_to TEXT"),
     ("forward_status",     "ALTER TABLE calls ADD COLUMN forward_status TEXT"),
+    ("intro_audio_url",    "ALTER TABLE calls ADD COLUMN intro_audio_url TEXT"),
 ]
 
 # Additive migrations for the campaigns table (added after the initial
@@ -150,6 +151,7 @@ def record_outcome(
     answered_by: str | None = None,
     call_status: str | None = None,
     hubspot_contact_id: str | None = None,
+    intro_audio_url: str | None = None,
 ) -> None:
     """Upsert a row keyed by ``call_sid``.
 
@@ -166,7 +168,7 @@ def record_outcome(
     with _connect() as conn:
         row = conn.execute(
             "SELECT call_sid, to_number, outcome, answered_by, call_status, "
-            "hubspot_contact_id FROM calls WHERE call_sid = ?",
+            "hubspot_contact_id, intro_audio_url FROM calls WHERE call_sid = ?",
             (call_sid,),
         ).fetchone()
 
@@ -174,8 +176,8 @@ def record_outcome(
             conn.execute(
                 "INSERT INTO calls "
                 "(call_sid, to_number, outcome, answered_by, call_status, "
-                " hubspot_contact_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " hubspot_contact_id, intro_audio_url, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     call_sid,
                     to_number,
@@ -183,6 +185,7 @@ def record_outcome(
                     answered_by,
                     call_status,
                     hubspot_contact_id,
+                    intro_audio_url,
                     now,
                     now,
                 ),
@@ -201,17 +204,23 @@ def record_outcome(
             if hubspot_contact_id is not None
             else row["hubspot_contact_id"]
         )
+        new_intro = (
+            intro_audio_url
+            if intro_audio_url is not None
+            else row["intro_audio_url"]
+        )
 
         conn.execute(
             "UPDATE calls SET to_number=?, outcome=?, answered_by=?, "
-            "call_status=?, hubspot_contact_id=?, updated_at=? "
-            "WHERE call_sid=?",
+            "call_status=?, hubspot_contact_id=?, intro_audio_url=?, "
+            "updated_at=? WHERE call_sid=?",
             (
                 new_to,
                 new_outcome,
                 new_answered,
                 new_status,
                 new_contact,
+                new_intro,
                 now,
                 call_sid,
             ),
@@ -223,6 +232,7 @@ def record_call_placed(
     *,
     to_number: str,
     hubspot_contact_id: str | None = None,
+    intro_audio_url: str | None = None,
 ) -> None:
     """Record that an outbound call has been placed.
 
@@ -234,6 +244,7 @@ def record_call_placed(
         call_sid,
         to_number=to_number,
         hubspot_contact_id=hubspot_contact_id,
+        intro_audio_url=intro_audio_url,
     )
 
 

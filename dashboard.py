@@ -63,53 +63,133 @@ _BASE_HEAD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ page_title or 'Campaigns' }} — Voicemail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
+  /* Phase 6 design tokens — Refined Minimal / Calm Operator
+     (see docs/phase6-plan.md). Class names and template structure
+     are unchanged to keep the JSON-poll JS and Jinja contracts
+     untouched. */
   :root {
-    --bg: #f6f8fb;
-    --surface: #ffffff;
-    --surface-2: #f3f5f9;
-    --border: #e3e7ee;
-    --border-strong: #cfd6e0;
-    --text: #1a2332;
-    --text-muted: #6b7585;
-    --primary: #2f6feb;
-    --primary-hover: #1f57c8;
-    --primary-soft: #e8f0fe;
-    --success: #0a7d2c;
-    --success-soft: #e3f5ea;
-    --warning: #b35900;
-    --warning-soft: #fff3e0;
-    --danger: #c0392b;
-    --danger-soft: #fbe6e3;
-    --neutral: #4b5563;
-    --neutral-soft: #eef0f3;
+    /* Surfaces & text — light */
+    --bg: #F8FAFC;
+    --surface: #FFFFFF;
+    --surface-2: #F1F5F9;
+    --border: #E2E8F0;
+    --border-strong: #CBD5E1;
+    --text: #0F172A;
+    --text-muted: #64748B;
+    /* Accent */
+    --primary: #2563EB;
+    --primary-hover: #1D4ED8;
+    --primary-soft: #EFF4FF;
+    /* Semantic */
+    --success: #059669;
+    --success-soft: #ECFDF5;
+    --warning: #B45309;
+    --warning-soft: #FFFBEB;
+    --danger:  #DC2626;
+    --danger-soft:  #FEF2F2;
+    --neutral: #475569;
+    --neutral-soft: #F1F5F9;
+    /* Effects */
+    --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.35);
     --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04),
                  0 1px 3px rgba(15, 23, 42, 0.06);
     --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06),
                  0 2px 4px rgba(15, 23, 42, 0.04);
+    /* Radius scale: 4 / 8 / 12 */
+    --radius-sm: 4px;
     --radius: 8px;
-    --radius-sm: 6px;
+    --radius-lg: 12px;
+    --radius-pill: 999px;
+    /* Spacing scale: 4 / 8 / 12 / 16 / 24 / 32 / 48 */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --space-6: 32px;
+    --space-7: 48px;
+    /* Typography */
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
+                 "SF Mono", Menlo, Consolas, monospace;
+    /* Motion */
+    --transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0B1220;
+      --surface: #111827;
+      --surface-2: #1F2937;
+      --border: #1F2937;
+      --border-strong: #374151;
+      --text: #E5E7EB;
+      --text-muted: #94A3B8;
+      --primary: #60A5FA;
+      --primary-hover: #3B82F6;
+      --primary-soft: rgba(96, 165, 250, 0.12);
+      --success: #34D399;
+      --success-soft: rgba(52, 211, 153, 0.12);
+      --warning: #FBBF24;
+      --warning-soft: rgba(251, 191, 36, 0.12);
+      --danger:  #F87171;
+      --danger-soft:  rgba(248, 113, 113, 0.12);
+      --neutral: #94A3B8;
+      --neutral-soft: rgba(148, 163, 184, 0.12);
+      --focus-ring: 0 0 0 3px rgba(96, 165, 250, 0.45);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+    }
+  }
+
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                 "Helvetica Neue", Arial, sans-serif;
+    font-family: var(--font-ui);
     font-size: 14px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  a { color: var(--primary); text-decoration: none; }
+  a { color: var(--primary); text-decoration: none;
+      transition: color var(--transition); }
   a:hover { text-decoration: underline; }
-  code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
-                     Consolas, monospace;
+
+  /* Visible keyboard focus ring on every interactive element. */
+  :focus { outline: none; }
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+    border-radius: var(--radius-sm);
+  }
+
+  /* Screen-reader-only utility for table captions etc. */
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0);
+    white-space: nowrap; border: 0;
+  }
+
+  code { font-family: var(--font-mono);
          font-size: 0.9em;
          background: var(--surface-2);
          padding: 0.1em 0.4em;
-         border-radius: 4px;
+         border-radius: var(--radius-sm);
          border: 1px solid var(--border); }
 
   /* Top app bar */
@@ -223,9 +303,8 @@ _BASE_HEAD = """<!doctype html>
     vertical-align: middle;
   }
   tbody tr:last-child td { border-bottom: 0; }
-  tbody tr.in-progress { background: rgba(47, 111, 235, 0.04); }
-  .cell-phone { font-family: ui-monospace, SFMono-Regular, Menlo,
-                              Consolas, monospace;
+  tbody tr.in-progress { background: var(--primary-soft); }
+  .cell-phone { font-family: var(--font-mono);
                 font-size: 0.92rem; }
   .cell-name { font-weight: 500; }
   .cell-muted { color: var(--text-muted); font-size: 0.9rem; }
@@ -249,10 +328,10 @@ _BASE_HEAD = """<!doctype html>
   }
   .pill-active { color: var(--success);
                  background: var(--success-soft);
-                 border-color: rgba(10, 125, 44, 0.2); }
+                 border-color: color-mix(in srgb, var(--success) 25%, transparent); }
   .pill-paused { color: var(--warning);
                  background: var(--warning-soft);
-                 border-color: rgba(179, 89, 0, 0.2); }
+                 border-color: color-mix(in srgb, var(--warning) 25%, transparent); }
   .pill-done   { color: var(--neutral);
                  background: var(--neutral-soft);
                  border-color: var(--border-strong); }
@@ -260,19 +339,19 @@ _BASE_HEAD = """<!doctype html>
   /* Outcome pills */
   .out-vm   { color: var(--success);
               background: var(--success-soft);
-              border-color: rgba(10, 125, 44, 0.18); }
+              border-color: color-mix(in srgb, var(--success) 22%, transparent); }
   .out-hum  { color: var(--primary);
               background: var(--primary-soft);
-              border-color: rgba(47, 111, 235, 0.2); }
+              border-color: color-mix(in srgb, var(--primary) 25%, transparent); }
   .out-no   { color: var(--warning);
               background: var(--warning-soft);
-              border-color: rgba(179, 89, 0, 0.18); }
+              border-color: color-mix(in srgb, var(--warning) 22%, transparent); }
   .out-bus  { color: var(--warning);
               background: var(--warning-soft);
-              border-color: rgba(179, 89, 0, 0.18); }
+              border-color: color-mix(in srgb, var(--warning) 22%, transparent); }
   .out-fail { color: var(--danger);
               background: var(--danger-soft);
-              border-color: rgba(192, 57, 43, 0.18); }
+              border-color: color-mix(in srgb, var(--danger) 22%, transparent); }
   .out-none { color: var(--text-muted); font-size: 0.85rem; }
 
   /* Buttons */
@@ -288,7 +367,8 @@ _BASE_HEAD = """<!doctype html>
     font-size: 0.88rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.12s ease, border-color 0.12s ease;
+    transition: background var(--transition), border-color var(--transition),
+                box-shadow var(--transition), color var(--transition);
     text-decoration: none;
   }
   .btn:hover:not(:disabled) {
@@ -317,7 +397,7 @@ _BASE_HEAD = """<!doctype html>
   .btn-warning {
     background: var(--surface);
     color: var(--warning);
-    border-color: rgba(179, 89, 0, 0.4);
+    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
   }
   .btn-danger {
     background: var(--surface);
@@ -356,7 +436,7 @@ _BASE_HEAD = """<!doctype html>
   input[type=text]:focus {
     outline: none;
     border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(47, 111, 235, 0.15);
+    box-shadow: var(--focus-ring);
   }
 
   /* Flash + error banners */
@@ -372,10 +452,10 @@ _BASE_HEAD = """<!doctype html>
   }
   .banner-info { background: var(--primary-soft);
                  color: var(--primary-hover);
-                 border-color: rgba(47, 111, 235, 0.25); }
+                 border-color: color-mix(in srgb, var(--primary) 30%, transparent); }
   .banner-error { background: var(--danger-soft);
                   color: var(--danger);
-                  border-color: rgba(192, 57, 43, 0.25); }
+                  border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 
   /* Empty state */
   .empty {
@@ -423,7 +503,7 @@ _BASE_HEAD = """<!doctype html>
   .live-indicator .live-dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--success);
-    box-shadow: 0 0 0 0 rgba(10, 125, 44, 0.6);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent);
     animation: pulse 1.8s ease-out infinite;
   }
   .live-indicator.stale .live-dot {
@@ -432,9 +512,9 @@ _BASE_HEAD = """<!doctype html>
     box-shadow: none;
   }
   @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(10, 125, 44, 0.6); }
-    70%  { box-shadow: 0 0 0 8px rgba(10, 125, 44, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(10, 125, 44, 0); }
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 60%, transparent); }
+    70%  { box-shadow: 0 0 0 8px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
   }
 
   /* Campaign metrics dashboard */
@@ -520,6 +600,83 @@ _BASE_HEAD = """<!doctype html>
     margin-top: 1.5rem;
     padding: 0 0.25rem;
   }
+
+  /* Inline action icons (Lucide). Inherits currentColor from button. */
+  .icon {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+    stroke: currentColor;
+    stroke-width: 2;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* Skeleton / loading affordance.
+     The 2.5s JSON poll mutates row text nodes in place. To avoid a
+     flicker, we (a) add a brief shimmer to in-progress rows so the
+     "this cell is about to change" intent is visible, and (b) expose a
+     reusable .skeleton utility for future placeholder rows. */
+  tbody tr.in-progress td {
+    position: relative;
+    overflow: hidden;
+  }
+  tbody tr.in-progress td::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--primary) 6%, transparent) 50%,
+      transparent 100%
+    );
+    transform: translateX(-100%);
+    animation: row-shimmer 1.6s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes row-shimmer {
+    100% { transform: translateX(100%); }
+  }
+
+  .skeleton {
+    display: inline-block;
+    min-width: 4rem;
+    height: 0.9em;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(
+      90deg,
+      var(--surface-2) 0%,
+      var(--border) 50%,
+      var(--surface-2) 100%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+    color: transparent;
+  }
+  @keyframes skeleton-shimmer {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
+
+  /* Respect prefers-reduced-motion: kill all decorative motion;
+     keep transitions short but disable infinite/keyframe animations. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+    .spinner,
+    .live-indicator .live-dot,
+    tbody tr.in-progress td::after {
+      animation: none !important;
+    }
+    .spinner { border-top-color: var(--primary); }
+    .live-indicator .live-dot { box-shadow: none; }
+    tbody tr.in-progress td::after { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -581,12 +738,13 @@ _LIST_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
   <div class="card-body tight">
     {% if campaigns %}
     <table>
+      <caption class="sr-only">All voicemail campaigns</caption>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>HubSpot list</th>
-          <th>Status</th>
-          <th>Created</th>
+          <th scope="col">Name</th>
+          <th scope="col">HubSpot list</th>
+          <th scope="col">Status</th>
+          <th scope="col">Created</th>
         </tr>
       </thead>
       <tbody>
@@ -675,7 +833,8 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
         <input type="hidden" name="status" value="active">
         <button type="submit" class="btn btn-success"
                 {% if campaign.status == 'active' %}disabled{% endif %}>
-          ▶ Start
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          Start
         </button>
       </form>
       <form class="inline" method="post"
@@ -683,7 +842,8 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
         <input type="hidden" name="status" value="paused">
         <button type="submit" class="btn btn-warning"
                 {% if campaign.status == 'paused' %}disabled{% endif %}>
-          ❚❚ Pause
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+          Pause
         </button>
       </form>
       <form class="inline" method="post"
@@ -691,7 +851,8 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
         <input type="hidden" name="status" value="done">
         <button type="submit" class="btn btn-danger"
                 {% if campaign.status == 'done' %}disabled{% endif %}>
-          ■ Done
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+          Done
         </button>
       </form>
       <form class="inline" method="post"
@@ -736,7 +897,7 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
         <span class="metric-value" data-metric="not_called">{{ metrics.not_called }}</span>
         <span class="metric-sub">Remaining</span>
       </div>
-      <div class="metric-tile accent-primary">
+      <div class="metric-tile accent-primary" aria-live="polite" aria-atomic="true">
         <span class="metric-label">In progress</span>
         <span class="metric-value" data-metric="in_progress">{{ metrics.in_progress }}</span>
         <span class="metric-sub">Dialing right now</span>
@@ -769,13 +930,14 @@ _DETAIL_TMPL = _BASE_HEAD + _OUTCOME_PILL_MACRO + """
     {% if contacts %}
     <table id="contacts-table"
            data-feed="{{ url_for('contacts_json', campaign_id=campaign.id) }}">
+      <caption class="sr-only">Contacts in this campaign with live call status</caption>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Phone</th>
-          <th class="num">Attempts</th>
-          <th>Last outcome</th>
-          <th>Last call</th>
+          <th scope="col">Name</th>
+          <th scope="col">Phone</th>
+          <th scope="col" class="num">Attempts</th>
+          <th scope="col">Last outcome</th>
+          <th scope="col">Last call</th>
         </tr>
       </thead>
       <tbody id="contacts-body">

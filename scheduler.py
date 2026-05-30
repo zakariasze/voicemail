@@ -40,6 +40,7 @@ import sys
 import time
 from typing import Any, Iterable
 
+import audio_cache
 import hubspot_client
 import state
 import twilio_client
@@ -233,9 +234,11 @@ def run_once(
             flush=True,
         )
         try:
+            intro_url = audio_cache.get_or_render_intro(c.get("firstname"))
             twilio_client.place_call(
                 c["_phone_e164"],
                 hubspot_contact_id=str(c["id"]),
+                intro_audio_url=intro_url,
             )
             dialed += 1
         except Exception as exc:  # noqa: BLE001 - never crash a whole pass

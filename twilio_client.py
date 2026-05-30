@@ -27,7 +27,12 @@ def _client() -> Client:
     return Client(config.twilio_account_sid(), config.twilio_auth_token())
 
 
-def place_call(to_number: str, *, hubspot_contact_id: str | None = None) -> str:
+def place_call(
+    to_number: str,
+    *,
+    hubspot_contact_id: str | None = None,
+    intro_audio_url: str | None = None,
+) -> str:
     """Place one outbound call to ``to_number`` with AMD enabled.
 
     Returns the Twilio ``CallSid``.
@@ -71,10 +76,12 @@ def place_call(to_number: str, *, hubspot_contact_id: str | None = None) -> str:
         call.sid,
         to_number=to_number,
         hubspot_contact_id=hubspot_contact_id,
+        intro_audio_url=intro_audio_url,
     )
     print(
         f"[twilio_client] placed call CallSid={call.sid} to={to_number}"
         + (f" hubspot_contact_id={hubspot_contact_id}" if hubspot_contact_id else "")
+        + (" intro=yes" if intro_audio_url else "")
     )
     return call.sid
 
