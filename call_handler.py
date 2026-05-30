@@ -32,6 +32,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import threading
 
 from flask import Flask, Response, request
@@ -657,7 +658,7 @@ def serve_audio(filename: str):
     import audio_cache as _audio_cache
 
     path = _audio_cache.cache_path_for_filename(filename)
-    if not path or not __import__("os").path.exists(path):
+    if not path or not os.path.exists(path):
         return ("not found", 404)
     # Stream the bytes back. We don't use Flask's send_from_directory
     # because the cache dir is configurable and may be relative to CWD;
