@@ -122,6 +122,45 @@ def hold_recording_url() -> str | None:
     return get("HOLD_RECORDING_URL")
 
 
+# --- Personalized AI intro (Phase 7) --------------------------------------
+
+_DEFAULT_INTRO_TEMPLATE = "Hi Dr. {first_name} —"
+
+
+def intro_enabled() -> bool:
+    """``True`` iff the personalized AI intro is turned on."""
+    return (get("INTRO_ENABLED", "false") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def elevenlabs_api_key() -> str:
+    return require("ELEVENLABS_API_KEY")
+
+
+def elevenlabs_voice_id() -> str:
+    return require("ELEVENLABS_VOICE_ID")
+
+
+def elevenlabs_model_id() -> str:
+    return get("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5") or "eleven_turbo_v2_5"
+
+
+def intro_template() -> str:
+    """Intro template. Supports ``{first_name}`` placeholder."""
+    return get("VOICEMAIL_INTRO_TEMPLATE", _DEFAULT_INTRO_TEMPLATE) or _DEFAULT_INTRO_TEMPLATE
+
+
+def intro_template_version() -> str:
+    """Bump to invalidate the audio cache after a template change."""
+    return get("VOICEMAIL_INTRO_TEMPLATE_VERSION", "1") or "1"
+
+
+def audio_cache_dir() -> str:
+    """Local directory where rendered intro MP3s are stored."""
+    return get("AUDIO_CACHE_DIR", "audio_cache") or "audio_cache"
+
+
 def priority_numbers() -> list[str]:
     """List of up to 3 E.164 priority numbers for call forwarding.
 

@@ -55,11 +55,21 @@ def _twiml(body: str) -> Response:
     return Response(f"{_XML_HEADER}<Response>{body}</Response>", mimetype="text/xml")
 
 
-def _play_and_hangup(recording_url: str) -> Response:
+def _play_and_hangup(recording_url: str, *, intro_url: str | None = None) -> Response:
     # Escape ampersands in the URL — TwiML is XML.
     safe_url = recording_url.replace("&", "&amp;")
     # With DetectMessageEnd, Twilio waits for the beep before calling
     # /voice, so we play immediately with no pause needed.
+    #
+    # If a personalized AI intro was rendered for this call, play it
+    # first. Twilio plays adjacent <Play> verbs back-to-back with no
+    # gap, so the seam is invisible when the intro and body share the
+    # same voice + audio format.
+    if intro_url:
+        safe_intro = intro_url.replace("&", "&amp;")
+        return _twiml(
+            f"<Play>{safe_intro}</Play><Play>{safe_url}</Play><Hangup/>"
+        )
     return _twiml(f"<Play>{safe_url}</Play><Hangup/>")
 
 
@@ -195,7 +205,19 @@ def voice() -> Response:
                 flush=True,
             )
             return _silent_hangup()
-        return _play_and_hangup(recording_url)
+        # Look up the personalized intro URL stashed at placement time.
+        # Falls back to body-only if the row is missing it (intro
+        # disabled, name unusable, render failed, or this call wasn't
+        # placed by us).
+        row = state.get(call_sid) or {}
+        intro_url = row.get("intro_audio_url")
+        if intro_url:
+            print(
+                f"[voice] CallSid={call_sid} playing personalized intro "
+                f"+ body",
+                flush=True,
+            )
+        return _play_and_hangup(recording_url, intro_url=intro_url)
 
     # Anything not classified as a machine (human / unknown / fax) is
     # forwarded. The press-to-accept whisper in /forward-whisper
@@ -622,6 +644,27 @@ def forward_status() -> Response:
 @app.get("/healthz")
 def healthz() -> tuple[str, int]:
     return ("ok", 200)
+
+
+@app.get("/audio/<path:filename>")
+def serve_audio(filename: str):
+    """Serve a cached personalized-intro MP3 to Twilio.
+
+    ``audio_cache.cache_path_for_filename`` validates that ``filename``
+    matches the 16-hex-char ``.mp3`` pattern produced by the cache key
+    hash, so this route can't be tricked into serving arbitrary files.
+    """
+    import audio_cache as _audio_cache
+
+    path = _audio_cache.cache_path_for_filename(filename)
+    if not path or not __import__("os").path.exists(path):
+        return ("not found", 404)
+    # Stream the bytes back. We don't use Flask's send_from_directory
+    # because the cache dir is configurable and may be relative to CWD;
+    # reading the bytes directly keeps the path-handling explicit.
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return Response(data, mimetype="audio/mpeg")
 
 
 if __name__ == "__main__":
